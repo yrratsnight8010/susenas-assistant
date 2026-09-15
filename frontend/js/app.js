@@ -1,6 +1,17 @@
 "use strict";
 
-const API_BASE = "";
+// GANTI ini ke URL ngrok backend kamu kalau frontend di-host terpisah
+// (misal di Vercel/Netlify) dari backend (Colab + ngrok). Kalau frontend
+// masih di-serve satu origin sama backend (lewat StaticFiles di main.py),
+// biarkan saja kosong "".
+const API_BASE = "https://gulf-extrude-cobalt.ngrok-free.dev";
+
+// Header ini yang bikin warning page ngrok ("You are about to visit...")
+// gak muncul untuk request API (fetch/axios) dari JS -- ngrok skip
+// interstitial-nya kalau lihat header ini di request. Tidak berpengaruh
+// ke halaman HTML yang dibuka langsung di address bar browser (itu request
+// native browser, gak lewat kode kita).
+const NGROK_HEADERS = { "ngrok-skip-browser-warning": "true" };
 
 const STORAGE_KEYS = {
   token: "susenas_token",
@@ -52,7 +63,7 @@ function formatRelativeTime(iso) {
 }
 
 async function apiFetch(path, options = {}) {
-  const headers = options.headers ? { ...options.headers } : {};
+  const headers = options.headers ? { ...options.headers, ...NGROK_HEADERS } : { ...NGROK_HEADERS };
   if (state.token) {
     headers["Authorization"] = `Bearer ${state.token}`;
   }
@@ -516,7 +527,7 @@ el.chatForm.addEventListener("submit", async (event) => {
   let errorDetail = null;
 
   try {
-    const headers = { "Content-Type": "application/json" };
+    const headers = { "Content-Type": "application/json", ...NGROK_HEADERS };
     if (state.token) headers["Authorization"] = `Bearer ${state.token}`;
 
     const response = await fetch(`${API_BASE}/api/v1/chat/ask/stream`, {

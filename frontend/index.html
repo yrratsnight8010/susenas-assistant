@@ -60,22 +60,6 @@
 
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
-    <!-- Tombol buka sidebar (desktop) -- hanya terlihat saat sidebar
-         dalam keadaan "collapsed" (lihat #app-shell.app-shell--sidebar-collapsed
-         di styles.css). Tidak tampil di breakpoint mobile karena mobile
-         sudah punya tombol hamburger sendiri di atas. -->
-    <button
-      type="button"
-      class="sidebar-expand-btn"
-      id="sidebar-expand-btn"
-      aria-label="Buka sidebar"
-      title="Buka sidebar"
-    >
-      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" aria-hidden="true">
-        <path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-    </button>
-
     <aside class="sidebar" id="app-sidebar">
       <div class="sidebar__brand">
         <span class="sidebar__brand-mark">S</span>
@@ -94,15 +78,32 @@
             <path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
+
+        <!-- Tombol buka-lagi -- hanya terlihat saat sidebar dalam keadaan
+             "collapsed" (lihat #app-shell.app-shell--sidebar-collapsed di
+             styles.css). Sekarang jadi BAGIAN dari sidebar (bukan melayang
+             fixed di atas konten lagi), jadi saat rail-nya menyusut jadi
+             kolom ikon, tombol ini yang tersisa terlihat di rail itu. -->
+        <button
+          type="button"
+          class="sidebar-expand-btn"
+          id="sidebar-expand-btn"
+          aria-label="Buka sidebar"
+          title="Buka sidebar"
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" aria-hidden="true">
+            <path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
 
       <!-- Daftar room percakapan -- hanya untuk role "user" -->
       <div class="sidebar__rooms" id="room-sidebar-section">
-        <button type="button" class="btn btn--block btn--new-room" id="new-room-btn">
+        <button type="button" class="btn btn--block btn--new-room" id="new-room-btn" title="Percakapan Baru">
           <svg viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true">
             <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
           </svg>
-          Percakapan Baru
+          <span class="sidebar__label">Percakapan Baru</span>
         </button>
 
         <div class="room-list" id="room-list">
@@ -111,11 +112,18 @@
       </div>
 
       <div class="sidebar__account">
-        <div class="sidebar__account-name" id="account-username">-</div>
-        <span class="sidebar__account-role" id="account-role">-</span>
+        <div class="sidebar__account-text">
+          <div class="sidebar__account-name" id="account-username">-</div>
+          <span class="sidebar__account-role" id="account-role">-</span>
+        </div>
 
-        <div style="margin-top: 14px;">
-          <button class="btn btn--ghost btn--small btn--block" id="logout-btn">Keluar</button>
+        <div class="sidebar__account-actions">
+          <button class="btn btn--ghost btn--small btn--block" id="logout-btn" title="Keluar">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true">
+              <path d="M6 2.5H4a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 4 13.5h2M10.5 11 14 8l-3.5-3M14 8H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="sidebar__label">Keluar</span>
+          </button>
         </div>
       </div>
     </aside>
