@@ -1,0 +1,20 @@
+# --- Web framework ---
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9   # wajib untuk UploadFile / Form di endpoint upload-pdf
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+PyJWT>=2.8
+
+# --- RAG pipeline (identik dengan versi Streamlit) ---
+sentence-transformers>=3.0
+qdrant-client>=1.9
+rank-bm25>=0.2.2
+Sastrawi>=1.0.1
+numpy>=1.26
+torch>=2.2
+pypdf>=4.2
+google-genai>=0.3.0
+groq>=0.9.0
+optimum[onnxruntime]

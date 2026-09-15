@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Secrets & konfigurasi lokal
+backend/.env
+backend/accounts.json
+
+# Data & index (besar, tidak untuk repo)
+backend/data/kb_susenas_maret2025.json
+backend/data/qdrant_db/
+backend/data/conversations.db
+backend/data/kb_backups/
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
