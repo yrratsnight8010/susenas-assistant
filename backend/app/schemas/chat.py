@@ -122,3 +122,12 @@ class DeleteCorrectionResponse(BaseModel):
     correction_id: str
     chunk_id: str
     status: str = "ok"
+
+
+class CorrectionUpdateRequest(BaseModel):
+    """Payload untuk PATCH /instructor/corrections/{correction_id} --
+    dipakai instruktur untuk memperbaiki ISI sebuah koreksi yang sudah
+    pernah disuntikkan, tanpa perlu menghapusnya dulu (yang akan membuat
+    interaksi terkait kembali muncul sebagai 'belum dikoreksi')."""
+
+    correction_text: str = Field(..., min_length=1)

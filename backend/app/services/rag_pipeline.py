@@ -96,10 +96,10 @@ class RetrievalConfig:
     reranker_model_name: str = "BAAI/bge-reranker-base"
     top_k_semantic: int = 5
     top_k_bm25: int = 5
-    final_top_k: int = 3  # jumlah kandidat yang di-rerank -- makin kecil, makin cepat
+    final_top_k: int = 5  # jumlah kandidat yang di-rerank -- makin kecil, makin cepat
                           # (reranker jalan sebanyak angka ini kali per pertanyaan)
     rrf_k: int = 60
-    top_k_rerank: int = 3  # jumlah kandidat FINAL setelah rerank -- dinaikkan dari 3 ke 5
+    top_k_rerank: int = 5  # jumlah kandidat FINAL setelah rerank -- dinaikkan dari 3 ke 5
                            # supaya kalau ada 2 chunk yang membahas topik sama tapi
                            # bertentangan (mis. koreksi lama vs koreksi baru), keduanya
                            # punya peluang lebih besar sama-sama lolos ke context block,
@@ -919,6 +919,41 @@ class ConversationStore:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(query).fetchall()
         return [dict(row) for row in rows]
+
+    def get_correction(self, correction_id: str) -> Optional[dict[str, Any]]:
+        """Ambil 1 baris koreksi lengkap (termasuk `original_question` &
+        `chunk_id` LAMA) -- dipakai endpoint PATCH /instructor/corrections/{id}
+        sebelum re-injeksi, supaya tahu pertanyaan aslinya dan chunk mana
+        yang harus dicabut setelah versi baru berhasil disuntikkan."""
+        query = """
+            SELECT c.id AS correction_id, c.interaction_id, c.correction_text,
+                   c.corrected_by, c.correction_date, c.correction_at, c.chunk_id,
+                   i.username, i.question AS original_question
+            FROM corrections c
+            JOIN interactions i ON i.id = c.interaction_id
+            WHERE c.id = ?
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(query, (correction_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_correction(self, correction_id: str, correction_text: str, corrected_by: str, chunk_id: str) -> bool:
+        """Perbarui teks sebuah koreksi yang sudah ada + `chunk_id` (hasil
+        re-injeksi ke KB dengan isi baru) DAN geser correction_date/
+        correction_at ke SEKARANG. Menggeser tanggal ini penting: aturan
+        'ambil informasi paling baru' di build_system_prompt membandingkan
+        tanggal informasi antar-KONTEKS, jadi versi yang baru diedit harus
+        tercatat sebagai yang TERBARU supaya tetap menang dibanding
+        konteks lain yang (mungkin) bertentangan dengannya."""
+        now = datetime.now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE corrections SET correction_text = ?, corrected_by = ?, "
+                "correction_date = ?, correction_at = ?, chunk_id = ? WHERE id = ?",
+                (correction_text, corrected_by, now.strftime("%Y-%m-%d"), now.isoformat(), chunk_id, correction_id),
+            )
+        return cur.rowcount > 0
 
     def delete_correction(self, correction_id: str) -> Optional[str]:
         """Hapus 1 baris di tabel `corrections` & reset interaksi terkait
