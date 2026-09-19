@@ -161,6 +161,7 @@
 
         <div class="tabs">
           <button class="tab-btn active" data-tab="correction">Koreksi Jawaban</button>
+          <button class="tab-btn" data-tab="log">Log Koreksi</button>
           <button class="tab-btn" data-tab="upload">Tambah Dokumen</button>
         </div>
 
@@ -171,6 +172,11 @@
             <label for="only-uncorrected">Hanya tampilkan yang belum dikoreksi</label>
           </div>
           <div id="interactions-list"></div>
+        </div>
+
+        <!-- Tab: Log Koreksi -- daftar koreksi yang sudah masuk KB, bisa dicabut -->
+        <div id="tab-log" class="hidden">
+          <div id="corrections-log-list"></div>
         </div>
 
         <!-- Tab: Tambah Dokumen -->

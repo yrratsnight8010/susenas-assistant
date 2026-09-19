@@ -100,3 +100,25 @@ class PDFUploadResponse(BaseModel):
     document_year: int
     chunks_added: int
     chunk_ids: list[str]
+
+
+class CorrectionLogItem(BaseModel):
+    """Satu baris di log koreksi -- untuk GET /instructor/corrections,
+    supaya instruktur bisa meninjau (dan mencabut lewat DELETE
+    /instructor/corrections/{correction_id}) koreksi yang ternyata salah."""
+
+    correction_id: str
+    interaction_id: str
+    chunk_id: str
+    correction_text: str
+    corrected_by: str
+    correction_date: str
+    correction_at: Optional[str] = None
+    username: str
+    original_question: str
+
+
+class DeleteCorrectionResponse(BaseModel):
+    correction_id: str
+    chunk_id: str
+    status: str = "ok"

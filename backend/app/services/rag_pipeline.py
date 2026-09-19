@@ -36,7 +36,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct
+from qdrant_client.models import PointStruct, PointIdsList
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
@@ -94,12 +94,16 @@ class RetrievalConfig:
     collection_name: str = "susenas_knowledgebase"
     embedding_model_name: str = "BAAI/bge-m3"
     reranker_model_name: str = "BAAI/bge-reranker-base"
-    top_k_semantic: int = 10
-    top_k_bm25: int = 10
-    final_top_k: int = 5  # jumlah kandidat yang di-rerank -- makin kecil, makin cepat
+    top_k_semantic: int = 5
+    top_k_bm25: int = 5
+    final_top_k: int = 3  # jumlah kandidat yang di-rerank -- makin kecil, makin cepat
                           # (reranker jalan sebanyak angka ini kali per pertanyaan)
     rrf_k: int = 60
-    top_k_rerank: int = 3  # jumlah kandidat FINAL setelah rerank (tidak diubah)
+    top_k_rerank: int = 3  # jumlah kandidat FINAL setelah rerank -- dinaikkan dari 3 ke 5
+                           # supaya kalau ada 2 chunk yang membahas topik sama tapi
+                           # bertentangan (mis. koreksi lama vs koreksi baru), keduanya
+                           # punya peluang lebih besar sama-sama lolos ke context block,
+                           # bukan cuma salah satu yang menang murni lewat rerank_score.
 
 
 @dataclass
@@ -115,7 +119,7 @@ class GenerationConfig:
 class AbstentionConfig:
     exact_phrase: str
     reference_paraphrases: list[str] = None
-    semantic_similarity_threshold: float = 0.70  # hasil kalibrasi -- lihat notebook riset
+    semantic_similarity_threshold: float = 0.75  # hasil kalibrasi -- lihat notebook riset
 
     def __post_init__(self) -> None:
         if not self.reference_paraphrases:
@@ -583,6 +587,30 @@ class KnowledgeBaseManager:
         logger.info("PDF '%s' (edisi %s) diinjeksi: %d chunk baru.", document_id, document_year, len(injected_ids))
         return injected_ids
 
+    def delete_chunk(self, chunk_id: str, collection_name: str) -> bool:
+        """Cabut 1 chunk dari KB in-memory + kb JSON + Qdrant, lalu rebuild
+        BM25. Dipakai saat instruktur mencabut sebuah koreksi yang ternyata
+        SALAH dari daftar log koreksi (lihat endpoint DELETE
+        /instructor/corrections/{correction_id}). Return False kalau
+        chunk_id sudah tidak ada di KB (mis. sudah pernah dihapus)."""
+        idx = next((i for i, c in enumerate(self.retriever.chunks) if c["chunk_id"] == chunk_id), None)
+        if idx is None:
+            logger.info("SKIP hapus -- chunk_id=%s sudah tidak ada di KB.", chunk_id)
+            return False
+
+        self._backup_kb_json()
+        self.retriever.chunks.pop(idx)
+        self._save_kb_json_atomic()
+        self.retriever.rebuild_bm25()
+
+        point_id = self._point_id_for(chunk_id)
+        self.retriever.qdrant_client.delete(
+            collection_name=collection_name,
+            points_selector=PointIdsList(points=[point_id]),
+        )
+        logger.info("DELETED chunk -> chunk_id=%s", chunk_id)
+        return True
+
 
 def extract_pdf_pages(file_bytes: bytes) -> list[str]:
     """Ekstrak teks per halaman dari file PDF (dalam bentuk bytes,
@@ -661,6 +689,11 @@ class ConversationStore:
             self._ensure_column(conn, "interactions", "verified", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "interactions", "verified_by", "TEXT")
             self._ensure_column(conn, "interactions", "verified_at", "TEXT")
+            # timestamp presisi (bukan cuma tanggal) -- dipakai untuk
+            # mengurutkan log koreksi (list_corrections) secara akurat.
+            # Baris lama (sebelum kolom ini ada) akan NULL, jadi
+            # list_corrections tetap fallback ke rowid untuk baris itu.
+            self._ensure_column(conn, "corrections", "correction_at", "TEXT")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
@@ -855,13 +888,54 @@ class ConversationStore:
         return results
 
     def mark_corrected(self, interaction_id: str, correction_text: str, corrected_by: str, chunk_id: str) -> None:
+        now = datetime.now()
         with self._connect() as conn:
             conn.execute("UPDATE interactions SET corrected = 1 WHERE id = ?", (interaction_id,))
             conn.execute(
-                "INSERT INTO corrections (id, interaction_id, correction_text, corrected_by, correction_date, chunk_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), interaction_id, correction_text, corrected_by, datetime.now().strftime("%Y-%m-%d"), chunk_id),
+                "INSERT INTO corrections "
+                "(id, interaction_id, correction_text, corrected_by, correction_date, chunk_id, correction_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), interaction_id, correction_text, corrected_by,
+                 now.strftime("%Y-%m-%d"), chunk_id, now.isoformat()),
             )
+
+    def list_corrections(self) -> list[dict[str, Any]]:
+        """Log seluruh koreksi yang pernah diinjeksi ke KB -- untuk endpoint
+        GET /instructor/corrections, supaya instruktur bisa meninjau (dan
+        kalau perlu mencabut lewat delete_correction()) koreksi yang salah.
+        Diurutkan dari yang PALING BARU diinjeksi. `correction_at` (timestamp
+        presisi) dipakai kalau ada; baris lama sebelum kolom ini ditambahkan
+        akan NULL, jadi fallback ke rowid (urutan insert) supaya tetap
+        terurut benar tanpa mematahkan histori lama."""
+        query = """
+            SELECT c.id AS correction_id, c.interaction_id, c.correction_text,
+                   c.corrected_by, c.correction_date, c.correction_at, c.chunk_id,
+                   i.username, i.question AS original_question
+            FROM corrections c
+            JOIN interactions i ON i.id = c.interaction_id
+            ORDER BY COALESCE(c.correction_at, '') DESC, c.rowid DESC
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(query).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_correction(self, correction_id: str) -> Optional[str]:
+        """Hapus 1 baris di tabel `corrections` & reset interaksi terkait
+        (corrected=0) supaya interaksi itu kembali muncul di antrean
+        instruktur seperti belum pernah dikoreksi. Return chunk_id yang
+        harus ikut dihapus dari KB/Qdrant (lewat KnowledgeBaseManager.
+        delete_chunk), atau None kalau correction_id tidak ditemukan."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT interaction_id, chunk_id FROM corrections WHERE id = ?", (correction_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute("DELETE FROM corrections WHERE id = ?", (correction_id,))
+            conn.execute("UPDATE interactions SET corrected = 0 WHERE id = ?", (row["interaction_id"],))
+        return row["chunk_id"]
 
     def mark_verified(self, interaction_id: str, verified_by: str) -> None:
         """Tandai jawaban chatbot SUDAH BENAR apa adanya -- TANPA
@@ -881,10 +955,28 @@ class ConversationStore:
 # RAG GENERATION (GEMINI)
 # =====================================================================
 
+def _context_date_label(chunk: dict[str, Any]) -> str:
+    """Ambil label tanggal/edisi 1 chunk untuk ditampilkan ke LLM, supaya
+    LLM punya dasar EKSPLISIT untuk memutuskan mana yang lebih baru kalau
+    ada 2+ KONTEKS yang bertentangan (lihat aturan 6 di build_system_prompt).
+    Tanpa ini, instruksi "pilih yang terbaru" di prompt tidak ada gunanya
+    karena LLM tidak pernah melihat tanggal apa pun di teks konteksnya."""
+    meta = chunk.get("metadata") or chunk
+    correction_date = meta.get("correction_date")
+    if correction_date:
+        return f"koreksi instruktur, {correction_date}"
+    document_year = meta.get("document_year")
+    if document_year:
+        return f"dokumen edisi {document_year}"
+    return "tidak diketahui"
+
+
 def build_context_block(retrieved_chunks: list[dict[str, Any]]) -> str:
-    return "\n\n".join(
-        f"[Konteks {i}]\n{chunk['text']}" for i, chunk in enumerate(retrieved_chunks, start=1)
-    )
+    blocks = []
+    for i, chunk in enumerate(retrieved_chunks, start=1):
+        date_label = _context_date_label(chunk)
+        blocks.append(f"[Konteks {i} | tanggal informasi: {date_label}]\n{chunk['text']}")
+    return "\n\n".join(blocks)
 
 
 def format_source_label(chunk: dict[str, Any]) -> str:
@@ -968,6 +1060,20 @@ Tanpa tambahan apa pun.
    Kalau pertanyaan meminta detail yang benar-benar tidak
    disebutkan di KONTEKS (bukan sekadar beda satuan), tetap
    ikuti aturan 2.
+
+6. Setiap KONTEKS diberi label "tanggal informasi" di headernya.
+   Jika ada DUA ATAU LEBIH KONTEKS yang membahas HAL YANG SAMA
+   tapi isinya BERTENTANGAN satu sama lain, kamu WAJIB:
+   - membandingkan tanggal informasi antar-KONTEKS yang bertentangan
+     tersebut,
+   - menjawab HANYA berdasarkan KONTEKS dengan tanggal informasi
+     PALING BARU,
+   - mengabaikan KONTEKS yang lebih lama sepenuhnya -- JANGAN
+     mencampur/menggabungkan isi dari KONTEKS lama dan baru yang
+     saling bertentangan itu ke dalam satu jawaban.
+   Aturan ini HANYA berlaku kalau KONTEKS-KONTEKS itu benar-benar
+   membahas hal yang sama tapi bertentangan. Kalau isinya cuma
+   saling melengkapi (tidak bertentangan), gabungkan seperti biasa.
 """
 
 

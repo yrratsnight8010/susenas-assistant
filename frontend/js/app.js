@@ -599,10 +599,71 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.classList.add("active");
     const tab = btn.dataset.tab;
     document.getElementById("tab-correction").classList.toggle("hidden", tab !== "correction");
+    document.getElementById("tab-log").classList.toggle("hidden", tab !== "log");
     document.getElementById("tab-upload").classList.toggle("hidden", tab !== "upload");
     if (tab === "correction") loadInteractions();
+    if (tab === "log") loadCorrectionsLog();
   });
 });
+
+function renderCorrectionLogCard(item) {
+  const card = document.createElement("div");
+  card.className = "interaction-card";
+
+  card.innerHTML = `
+    <div class="interaction-card__meta">
+      <span>${formatTimestamp(item.correction_at || item.correction_date)} &middot; oleh ${escapeHtml(item.corrected_by)}</span>
+      <span class="tag tag--done">Terinjeksi ke KB</span>
+    </div>
+    <div class="interaction-card__question">Pertanyaan asli (${escapeHtml(item.username)}): ${escapeHtml(item.original_question)}</div>
+    <div class="interaction-card__answer">${escapeHtml(item.correction_text)}</div>
+  `;
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.className = "btn btn--small btn--danger";
+  deleteBtn.textContent = "Hapus koreksi ini";
+
+  deleteBtn.addEventListener("click", async () => {
+    const confirmed = await confirmDialog({
+      title: "Hapus koreksi?",
+      body: "Koreksi ini akan dicabut permanen dari log, KB JSON, dan Qdrant. Interaksi terkait akan muncul lagi di antrean instruktur.",
+      confirmLabel: "Hapus",
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = "Menghapus...";
+    try {
+      await apiFetch(`/api/v1/instructor/corrections/${item.correction_id}`, { method: "DELETE" });
+      showToast("Koreksi dihapus dari KB.", "success");
+      await loadCorrectionsLog();
+    } catch (err) {
+      showToast(err.message || "Gagal menghapus koreksi.", "error");
+      deleteBtn.disabled = false;
+      deleteBtn.textContent = "Hapus koreksi ini";
+    }
+  });
+
+  card.appendChild(deleteBtn);
+  return card;
+}
+
+async function loadCorrectionsLog() {
+  const container = document.getElementById("corrections-log-list");
+  container.innerHTML = `<p class="spinner-note">Memuat log koreksi...</p>`;
+  try {
+    const corrections = await apiFetch("/api/v1/instructor/corrections");
+    container.innerHTML = "";
+    if (!corrections || corrections.length === 0) {
+      container.innerHTML = `<p class="spinner-note">Belum ada koreksi yang tercatat.</p>`;
+      return;
+    }
+    corrections.forEach((item) => container.appendChild(renderCorrectionLogCard(item)));
+  } catch (err) {
+    container.innerHTML = `<div class="form-error">${escapeHtml(err.message)}</div>`;
+  }
+}
 
 function renderInteractionCard(item) {
   const card = document.createElement("div");

@@ -3,8 +3,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from app.core.security import require_role
 from app.dependencies import get_resources
 from app.schemas.chat import (
+    CorrectionLogItem,
     CorrectionRequest,
     CorrectionResponse,
+    DeleteCorrectionResponse,
     InteractionSummary,
     PDFUploadResponse,
     VerifyRequest,
@@ -85,6 +87,48 @@ def verify(
 ) -> VerifyResponse:
     resources.conversation_store.mark_verified(payload.interaction_id, verified_by=user["username"])
     return VerifyResponse(interaction_id=payload.interaction_id)
+
+
+@router.get(
+    "/corrections",
+    response_model=list[CorrectionLogItem],
+    summary="Log seluruh koreksi yang sudah diinjeksi ke Knowledge Base",
+    description=(
+        "Daftar semua koreksi instruktur yang pernah disuntikkan ke KB "
+        "(tabel `corrections`), terurut dari yang paling baru. Dipakai "
+        "instruktur untuk meninjau -- dan lewat DELETE di bawah, mencabut "
+        "kembali -- koreksi yang ternyata salah."
+    ),
+)
+def list_corrections(
+    resources: PipelineResources = Depends(get_resources),
+    _user: dict = Depends(require_role("instruktur")),
+) -> list[CorrectionLogItem]:
+    return [CorrectionLogItem(**item) for item in resources.conversation_store.list_corrections()]
+
+
+@router.delete(
+    "/corrections/{correction_id}",
+    response_model=DeleteCorrectionResponse,
+    summary="Cabut 1 koreksi yang salah: hapus dari log, KB JSON, dan Qdrant",
+    description=(
+        "Dipakai kalau instruktur sadar sebuah koreksi ternyata SALAH: "
+        "baris koreksinya dihapus dari log, chunk-nya dicabut dari KB JSON "
+        "+ index Qdrant/BM25 (lewat KnowledgeBaseManager.delete_chunk), dan "
+        "interaksi terkait direset (corrected=0) supaya muncul lagi di "
+        "antrean instruktur seperti belum pernah dikoreksi."
+    ),
+)
+def delete_correction(
+    correction_id: str,
+    resources: PipelineResources = Depends(get_resources),
+    _user: dict = Depends(require_role("instruktur")),
+) -> DeleteCorrectionResponse:
+    chunk_id = resources.conversation_store.delete_correction(correction_id)
+    if chunk_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Koreksi tidak ditemukan.")
+    resources.kb_manager.delete_chunk(chunk_id, resources.retrieval_config.collection_name)
+    return DeleteCorrectionResponse(correction_id=correction_id, chunk_id=chunk_id)
 
 
 @router.post(
