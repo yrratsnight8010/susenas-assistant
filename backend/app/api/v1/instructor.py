@@ -6,6 +6,7 @@ from app.schemas.chat import (
     CorrectionLogItem,
     CorrectionRequest,
     CorrectionResponse,
+    CorrectionUpdateRequest,
     DeleteCorrectionResponse,
     InteractionSummary,
     PDFUploadResponse,
@@ -105,6 +106,58 @@ def list_corrections(
     _user: dict = Depends(require_role("instruktur")),
 ) -> list[CorrectionLogItem]:
     return [CorrectionLogItem(**item) for item in resources.conversation_store.list_corrections()]
+
+
+@router.patch(
+    "/corrections/{correction_id}",
+    response_model=CorrectionResponse,
+    summary="Edit isi 1 koreksi yang sudah ada & re-injeksi ke KB",
+    description=(
+        "Dipakai kalau instruktur sadar TEKS koreksinya perlu diperbaiki "
+        "(bukan dihapus total). Bedanya dengan DELETE: interaksi terkait "
+        "TETAP berstatus 'sudah dikoreksi' (tidak muncul lagi di antrean), "
+        "hanya isi koreksinya yang diganti. Di baliknya: chunk versi LAMA "
+        "dicabut dari KB JSON + Qdrant, versi BARU disuntikkan sebagai "
+        "chunk baru (chunk_id berubah karena deterministik dari isi teks), "
+        "dan correction_date/correction_at digeser ke SEKARANG supaya "
+        "aturan 'ambil informasi paling baru' di system prompt tetap benar "
+        "menganggap hasil edit ini sebagai versi terbaru."
+    ),
+)
+def update_correction(
+    correction_id: str,
+    payload: CorrectionUpdateRequest,
+    resources: PipelineResources = Depends(get_resources),
+    user: dict = Depends(require_role("instruktur")),
+) -> CorrectionResponse:
+    existing = resources.conversation_store.get_correction(correction_id)
+    if existing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Koreksi tidak ditemukan.")
+
+    try:
+        new_chunk_id = resources.kb_manager.inject_correction(
+            question=existing["original_question"],
+            correction_text=payload.correction_text,
+            corrected_by=user["username"],
+            collection_name=resources.retrieval_config.collection_name,
+        )
+        old_chunk_id = existing.get("chunk_id")
+        if old_chunk_id and old_chunk_id != new_chunk_id:
+            resources.kb_manager.delete_chunk(old_chunk_id, resources.retrieval_config.collection_name)
+
+        resources.conversation_store.update_correction(
+            correction_id=correction_id,
+            correction_text=payload.correction_text,
+            corrected_by=user["username"],
+            chunk_id=new_chunk_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Gagal memperbarui koreksi: {exc}",
+        ) from exc
+
+    return CorrectionResponse(interaction_id=existing["interaction_id"], chunk_id=new_chunk_id)
 
 
 @router.delete(

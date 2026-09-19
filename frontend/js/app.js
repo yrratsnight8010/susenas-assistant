@@ -383,6 +383,40 @@ async function deleteRoom(roomId) {
   }
 }
 
+// ---------------------------------------------------------------------
+// Kalimat pembuka -- ditampilkan saat sebuah room belum punya pesan
+// sama sekali, gantinya placeholder statis. Salam disesuaikan jam
+// saat itu, kalimatnya dipilih acak dari beberapa variasi.
+// ---------------------------------------------------------------------
+
+const OPENING_LINES = [
+  "Ada yang mau ditanyakan seputar Susenas Maret 2025?",
+  "Mau tanya soal pengeluaran, kemiskinan, ketenagakerjaan, atau topik Susenas lain?",
+  "Aku siap bantu telusuri data Susenas Maret 2025 -- tanyakan apa saja.",
+  "Coba tanyakan definisi, metodologi, atau angka tertentu dari Susenas Maret 2025.",
+  "Silakan mulai dengan pertanyaanmu -- jawabannya akan disertai sumber yang tertelusuri.",
+];
+
+function timeOfDaySalutation() {
+  const hour = new Date().getHours();
+  if (hour >= 4 && hour < 11) return "Selamat pagi";
+  if (hour >= 11 && hour < 15) return "Selamat siang";
+  if (hour >= 15 && hour < 19) return "Selamat sore";
+  return "Selamat malam";
+}
+
+function renderChatEmptyGreeting() {
+  const salutation = timeOfDaySalutation();
+  const namePart = state.username ? `, ${escapeHtml(state.username)}` : "";
+  const line = OPENING_LINES[Math.floor(Math.random() * OPENING_LINES.length)];
+  return `
+    <div class="chat-empty">
+      <div class="chat-empty__title">${salutation}${namePart} 👋</div>
+      <div class="chat-empty__subtitle">${line}</div>
+    </div>
+  `;
+}
+
 function renderSources(sources, context) {
   if (!sources || sources.length === 0) {
     return `<p style="color: var(--ink-soft); font-size: 13px;">Tidak ada sumber tercatat.</p>`;
@@ -490,7 +524,7 @@ async function loadChatHistory() {
     el.chatLog.innerHTML = "";
 
     if (!history || history.length === 0) {
-      el.chatLog.innerHTML = `<div class="chat-empty">Belum ada percakapan. Coba tanyakan sesuatu tentang Susenas Maret 2025.</div>`;
+      el.chatLog.innerHTML = renderChatEmptyGreeting();
       return;
     }
 
@@ -606,22 +640,113 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
-function renderCorrectionLogCard(item) {
-  const card = document.createElement("div");
-  card.className = "interaction-card";
-
-  card.innerHTML = `
-    <div class="interaction-card__meta">
-      <span>${formatTimestamp(item.correction_at || item.correction_date)} &middot; oleh ${escapeHtml(item.corrected_by)}</span>
-      <span class="tag tag--done">Terinjeksi ke KB</span>
+function tableShell(headers, tbodyId) {
+  const headHtml = headers.map((h) => `<th>${h}</th>`).join("");
+  return `
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr>${headHtml}</tr></thead>
+        <tbody id="${tbodyId}"></tbody>
+      </table>
     </div>
-    <div class="interaction-card__question">Pertanyaan asli (${escapeHtml(item.username)}): ${escapeHtml(item.original_question)}</div>
-    <div class="interaction-card__answer">${escapeHtml(item.correction_text)}</div>
+  `;
+}
+
+// ---------------------------------------------------------------------
+// Instruktur -- Tab "Log Koreksi" (tabel, dengan Edit inline & Hapus)
+// ---------------------------------------------------------------------
+
+function renderCorrectionRow(item) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td class="col-meta">${formatTimestamp(item.correction_at || item.correction_date)}</td>
+    <td class="col-meta">${escapeHtml(item.corrected_by)}</td>
+    <td class="col-meta">${escapeHtml(item.username)}</td>
+    <td class="col-question">${escapeHtml(item.original_question)}</td>
+    <td class="col-answer" data-role="correction-cell"></td>
+    <td class="col-actions"></td>
   `;
 
+  const correctionCell = tr.querySelector('[data-role="correction-cell"]');
+  const actionsCell = tr.querySelector(".col-actions");
+  correctionCell.textContent = item.correction_text;
+
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "btn btn--small btn--ghost";
+  editBtn.textContent = "Edit";
+
   const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
   deleteBtn.className = "btn btn--small btn--danger";
-  deleteBtn.textContent = "Hapus koreksi ini";
+  deleteBtn.textContent = "Hapus";
+
+  const actionsWrap = document.createElement("div");
+  actionsWrap.className = "data-table__actions-inline";
+  actionsWrap.appendChild(editBtn);
+  actionsWrap.appendChild(deleteBtn);
+  actionsCell.appendChild(actionsWrap);
+
+  editBtn.addEventListener("click", () => {
+    const currentText = item.correction_text;
+    correctionCell.innerHTML = "";
+
+    const textarea = document.createElement("textarea");
+    textarea.value = currentText;
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "btn btn--small";
+    saveBtn.textContent = "Simpan";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "btn btn--small btn--ghost";
+    cancelBtn.textContent = "Batal";
+
+    const editActions = document.createElement("div");
+    editActions.className = "data-table__actions-inline";
+    editActions.appendChild(saveBtn);
+    editActions.appendChild(cancelBtn);
+
+    correctionCell.appendChild(textarea);
+    correctionCell.appendChild(editActions);
+    textarea.focus();
+
+    editBtn.disabled = true;
+    deleteBtn.disabled = true;
+
+    cancelBtn.addEventListener("click", () => {
+      correctionCell.innerHTML = "";
+      correctionCell.textContent = currentText;
+      editBtn.disabled = false;
+      deleteBtn.disabled = false;
+    });
+
+    saveBtn.addEventListener("click", async () => {
+      const newText = textarea.value.trim();
+      if (!newText) {
+        showToast("Isi koreksi tidak boleh kosong.", "error");
+        return;
+      }
+      saveBtn.disabled = true;
+      cancelBtn.disabled = true;
+      saveBtn.textContent = "Menyimpan...";
+      try {
+        await apiFetch(`/api/v1/instructor/corrections/${item.correction_id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ correction_text: newText }),
+        });
+        showToast("Koreksi berhasil diperbarui & disuntik ulang ke KB.", "success");
+        await loadCorrectionsLog();
+      } catch (err) {
+        showToast(err.message || "Gagal memperbarui koreksi.", "error");
+        saveBtn.disabled = false;
+        cancelBtn.disabled = false;
+        saveBtn.textContent = "Simpan";
+      }
+    });
+  });
 
   deleteBtn.addEventListener("click", async () => {
     const confirmed = await confirmDialog({
@@ -632,6 +757,7 @@ function renderCorrectionLogCard(item) {
     });
     if (!confirmed) return;
 
+    editBtn.disabled = true;
     deleteBtn.disabled = true;
     deleteBtn.textContent = "Menghapus...";
     try {
@@ -640,13 +766,13 @@ function renderCorrectionLogCard(item) {
       await loadCorrectionsLog();
     } catch (err) {
       showToast(err.message || "Gagal menghapus koreksi.", "error");
+      editBtn.disabled = false;
       deleteBtn.disabled = false;
-      deleteBtn.textContent = "Hapus koreksi ini";
+      deleteBtn.textContent = "Hapus";
     }
   });
 
-  card.appendChild(deleteBtn);
-  return card;
+  return tr;
 }
 
 async function loadCorrectionsLog() {
@@ -654,20 +780,28 @@ async function loadCorrectionsLog() {
   container.innerHTML = `<p class="spinner-note">Memuat log koreksi...</p>`;
   try {
     const corrections = await apiFetch("/api/v1/instructor/corrections");
-    container.innerHTML = "";
     if (!corrections || corrections.length === 0) {
       container.innerHTML = `<p class="spinner-note">Belum ada koreksi yang tercatat.</p>`;
       return;
     }
-    corrections.forEach((item) => container.appendChild(renderCorrectionLogCard(item)));
+    container.innerHTML = tableShell(
+      ["Waktu", "Oleh", "User Asal", "Pertanyaan Asli", "Isi Koreksi", "Aksi"],
+      "corrections-tbody",
+    );
+    const tbody = document.getElementById("corrections-tbody");
+    corrections.forEach((item) => tbody.appendChild(renderCorrectionRow(item)));
   } catch (err) {
     container.innerHTML = `<div class="form-error">${escapeHtml(err.message)}</div>`;
   }
 }
 
-function renderInteractionCard(item) {
-  const card = document.createElement("div");
-  card.className = "interaction-card";
+// ---------------------------------------------------------------------
+// Instruktur -- Tab "Koreksi Jawaban" (tabel, baris "Tinjau" bisa
+// dibentangkan untuk verifikasi/koreksi tanpa pindah halaman)
+// ---------------------------------------------------------------------
+
+function renderInteractionRows(item) {
+  const tr = document.createElement("tr");
 
   let statusTag = `<span class="tag">Terjawab</span>`;
   if (item.corrected) {
@@ -678,32 +812,44 @@ function renderInteractionCard(item) {
     statusTag = `<span class="tag tag--warn">Abstain</span>`;
   }
 
-  card.innerHTML = `
-    <div class="interaction-card__meta">
-      <span>${formatTimestamp(item.timestamp)} &middot; ${escapeHtml(item.username)}</span>
-      ${statusTag}
-    </div>
-    <div class="interaction-card__question">${escapeHtml(item.question)}</div>
-    <div class="interaction-card__answer">${escapeHtml(item.answer)}</div>
+  tr.innerHTML = `
+    <td class="col-meta">${formatTimestamp(item.timestamp)}</td>
+    <td class="col-meta">${escapeHtml(item.username)}</td>
+    <td>${statusTag}</td>
+    <td class="col-question">${escapeHtml(item.question)}</td>
+    <td class="col-answer">${escapeHtml(item.answer)}</td>
+    <td class="col-actions"></td>
   `;
 
+  const actionsCell = tr.querySelector(".col-actions");
+
   if (item.corrected || item.verified) {
-    const note = document.createElement("div");
-    note.className = "interaction-card__done-note";
-    note.textContent = item.corrected
-      ? "Interaksi ini sudah pernah dikoreksi."
-      : "Interaksi ini sudah ditandai terverifikasi (jawaban chatbot sudah benar).";
-    card.appendChild(note);
-    return card;
+    const note = document.createElement("span");
+    note.style.cssText = "color: var(--ink-soft); font-size: 12.5px;";
+    note.textContent = item.corrected ? "Sudah dikoreksi" : "Sudah diverifikasi";
+    actionsCell.appendChild(note);
+    return [tr];
   }
 
-  const verifyRow = document.createElement("div");
-  verifyRow.className = "interaction-card__verify-row";
+  const expandTr = document.createElement("tr");
+  expandTr.className = "data-table__expand-row hidden";
+  const expandTd = document.createElement("td");
+  expandTd.colSpan = 6;
+
+  const toggleBtn = document.createElement("button");
+  toggleBtn.type = "button";
+  toggleBtn.className = "btn btn--small btn--ghost";
+  toggleBtn.textContent = "Tinjau";
+  toggleBtn.addEventListener("click", () => {
+    const nowHidden = expandTr.classList.toggle("hidden");
+    toggleBtn.textContent = nowHidden ? "Tinjau" : "Tutup";
+  });
+  actionsCell.appendChild(toggleBtn);
 
   const verifyBtn = document.createElement("button");
+  verifyBtn.type = "button";
   verifyBtn.className = "btn btn--small btn--ghost";
   verifyBtn.textContent = "✓ Tandai Sudah Benar (tanpa koreksi)";
-
   verifyBtn.addEventListener("click", async () => {
     verifyBtn.disabled = true;
     verifyBtn.textContent = "Menandai...";
@@ -721,16 +867,17 @@ function renderInteractionCard(item) {
     }
   });
 
+  const verifyRow = document.createElement("div");
+  verifyRow.className = "data-table__actions-inline";
   verifyRow.appendChild(verifyBtn);
-  card.appendChild(verifyRow);
 
   const textarea = document.createElement("textarea");
   textarea.placeholder = "...atau isi jawaban yang benar / koreksi di sini kalau jawaban chatbot perlu diganti";
 
   const submitBtn = document.createElement("button");
+  submitBtn.type = "button";
   submitBtn.className = "btn btn--small";
   submitBtn.textContent = "Simpan & Injeksi ke Knowledge Base";
-
   submitBtn.addEventListener("click", async () => {
     const correctionText = textarea.value.trim();
     if (!correctionText) {
@@ -757,9 +904,16 @@ function renderInteractionCard(item) {
     }
   });
 
-  card.appendChild(textarea);
-  card.appendChild(submitBtn);
-  return card;
+  const submitRow = document.createElement("div");
+  submitRow.className = "data-table__actions-inline";
+  submitRow.appendChild(submitBtn);
+
+  expandTd.appendChild(verifyRow);
+  expandTd.appendChild(textarea);
+  expandTd.appendChild(submitRow);
+  expandTr.appendChild(expandTd);
+
+  return [tr, expandTr];
 }
 
 async function loadInteractions() {
@@ -767,12 +921,18 @@ async function loadInteractions() {
   const onlyUncorrected = el.onlyUncorrected.checked;
   try {
     const interactions = await apiFetch(`/api/v1/instructor/interactions?only_uncorrected=${onlyUncorrected}`);
-    el.interactionsList.innerHTML = "";
     if (!interactions || interactions.length === 0) {
       el.interactionsList.innerHTML = `<p class="spinner-note">Belum ada percakapan yang tercatat.</p>`;
       return;
     }
-    interactions.forEach((item) => el.interactionsList.appendChild(renderInteractionCard(item)));
+    el.interactionsList.innerHTML = tableShell(
+      ["Waktu", "User", "Status", "Pertanyaan", "Jawaban Chatbot", "Aksi"],
+      "interactions-tbody",
+    );
+    const tbody = document.getElementById("interactions-tbody");
+    interactions.forEach((item) => {
+      renderInteractionRows(item).forEach((row) => tbody.appendChild(row));
+    });
   } catch (err) {
     el.interactionsList.innerHTML = `<div class="form-error">${escapeHtml(err.message)}</div>`;
   }

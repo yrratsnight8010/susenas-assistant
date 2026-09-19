@@ -769,8 +769,21 @@ main.content {
 .chat-empty {
   color: var(--ink-soft);
   font-size: 14px;
-  padding: 40px 0;
+  padding: 40px 20px;
   text-align: center;
+}
+
+.chat-empty__title {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 16px;
+  margin-bottom: 6px;
+}
+
+.chat-empty__subtitle {
+  color: var(--ink-soft);
+  max-width: 440px;
+  margin: 0 auto;
 }
 
 .msg {
@@ -1181,6 +1194,110 @@ details.sources-context summary {
   color: var(--ink-soft);
   font-size: 13.5px;
   font-style: italic;
+}
+
+/* ---------------------------------------------------------------------
+   Tabel data -- dipakai di tab "Koreksi Jawaban" & "Log Koreksi" panel
+   instruktur, gantinya kartu bertumpuk supaya lebih rapi & padat kalau
+   datanya banyak. .table-wrap yang scroll horizontal (bukan tabelnya
+   langsung) supaya header sticky & border radius tetap rapi.
+   --------------------------------------------------------------------- */
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.data-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 11px 14px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.data-table thead th {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  background: var(--support);
+  white-space: nowrap;
+}
+
+.data-table tbody tr:hover {
+  background: var(--support);
+}
+
+.data-table tbody tr:last-child > td {
+  border-bottom: none;
+}
+
+.data-table td.col-question {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 200px;
+}
+
+.data-table td.col-answer {
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  min-width: 220px;
+}
+
+.data-table td.col-meta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.data-table td.col-actions {
+  white-space: nowrap;
+}
+
+.data-table__empty td {
+  text-align: center;
+  color: var(--ink-soft);
+  font-style: italic;
+  padding: 26px 14px;
+}
+
+.data-table__expand-row > td {
+  background: var(--bg);
+}
+
+.data-table__actions-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.data-table textarea {
+  width: 100%;
+  min-width: 260px;
+  min-height: 76px;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+  font-family: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  background: var(--surface);
 }
 
 /* ---------------------------------------------------------------------
