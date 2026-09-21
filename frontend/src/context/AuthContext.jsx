@@ -24,9 +24,22 @@ export function AuthProvider({ children }) {
   // parameter isFreshLogin di showAppShell() versi vanilla JS.
   const [justLoggedIn, setJustLoggedIn] = useState(false);
 
-  useEffect(() => {
-    setApiToken(auth.token);
-  }, [auth.token]);
+  // BUG YANG DIPERBAIKI: sebelumnya sinkronisasi token ke client.js
+  // dilakukan lewat useEffect -- tapi React menjalankan useEffect anak
+  // LEBIH DULU daripada useEffect induk (AuthProvider ada di paling atas
+  // pohon komponen). Akibatnya, begitu AppShell pertama kali dirender
+  // (baik dari sesi lama yang dipulihkan localStorage, maupun sesaat
+  // sesudah login()), komponen anak yang langsung fetch data di
+  // useEffect-nya sendiri (mis. CorrectionsTab di panel instruktur)
+  // sempat mengirim request DULUAN, sebelum useEffect AuthProvider ini
+  // sempat menaruh token ke client.js -- request itu berangkat TANPA
+  // header Authorization sama sekali, dan backend membalas 403 "Not
+  // authenticated". Solusinya: panggil setApiToken() LANGSUNG di body
+  // komponen (saat render), bukan di useEffect. Ini aman -- cuma
+  // assignment ke variabel di luar React, idempoten, tidak mengubah hasil
+  // render -- dan dijamin sudah selesai SEBELUM React mulai me-render
+  // komponen anak mana pun, apalagi menjalankan efek mereka.
+  setApiToken(auth.token);
 
   const login = useCallback((token, username, role) => {
     localStorage.setItem(STORAGE_KEYS.token, token);
