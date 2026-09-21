@@ -96,10 +96,10 @@ class RetrievalConfig:
     reranker_model_name: str = "BAAI/bge-reranker-base"
     top_k_semantic: int = 5
     top_k_bm25: int = 5
-    final_top_k: int = 5  # jumlah kandidat yang di-rerank -- makin kecil, makin cepat
+    final_top_k: int = 3  # jumlah kandidat yang di-rerank -- makin kecil, makin cepat
                           # (reranker jalan sebanyak angka ini kali per pertanyaan)
     rrf_k: int = 60
-    top_k_rerank: int = 5  # jumlah kandidat FINAL setelah rerank -- dinaikkan dari 3 ke 5
+    top_k_rerank: int = 3  # jumlah kandidat FINAL setelah rerank -- dinaikkan dari 3 ke 5
                            # supaya kalau ada 2 chunk yang membahas topik sama tapi
                            # bertentangan (mis. koreksi lama vs koreksi baru), keduanya
                            # punya peluang lebih besar sama-sama lolos ke context block,
@@ -429,10 +429,21 @@ def load_embedding_model(model_name: str) -> SentenceTransformer:
 
 
 def load_reranker(model_name: str) -> CrossEncoder:
+    # BUG YANG DIPERBAIKI: sebelumnya `device` dihitung tapi tidak pernah
+    # diteruskan ke CrossEncoder(...) -- jadi murni dead code, device
+    # sebenarnya ditentukan sendiri oleh default internal sentence-
+    # transformers. Log-nya juga salah bilang "backend=onnx": itu sisa
+    # eksperimen ONNX/OpenVINO (lihat blok yang dikomentari di bawah) yang
+    # sudah ditinggalkan karena bug di library export-nya -- backend yang
+    # betulan dipakai sekarang adalah torch biasa (default CrossEncoder).
     device = _select_device()
-    logger.info("Loading reranker %s (backend=onnx, device=%s)", model_name, device,)
-    return CrossEncoder(model_name, max_length=512,)
+    logger.info("Loading reranker %s (backend=torch, device=%s)", model_name, device)
+    return CrossEncoder(model_name, max_length=512, device=device)
 
+# Percobaan mempercepat reranker lewat ONNX/OpenVINO -- DITINGGALKAN karena
+# proses export OpenVINO kena bug library yang belum ada perbaikannya.
+# Solusi kecepatan yang dipakai sebagai gantinya: ganti model ke varian
+# lebih ringan (BAAI/bge-reranker-base, lihat RetrievalConfig di atas).
 # def load_reranker(model_name: str) -> CrossEncoder:
 #     reranker_path = "./data/reranker_base_onnx"
 #     device = _select_device()

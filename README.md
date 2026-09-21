@@ -1,10 +1,11 @@
 # Asisten Susenas Maret 2025 — FastAPI Edition
 
-Migrasi dari aplikasi Streamlit lama ke arsitektur **backend FastAPI (REST API)
-+ frontend statis terpisah**. Logika RAG (retrieval hybrid, generation Gemini,
-abstention detector, injeksi koreksi/PDF) **tidak diubah** — hanya dipindahkan
-ke lapisan service yang dipanggil lewat endpoint API, bukan lagi lewat widget
-Streamlit.
+Migrasi dari aplikasi Streamlit lama ke arsitektur \*\*backend FastAPI (REST API)
+
+- frontend statis terpisah**. Logika RAG (retrieval hybrid, generation Gemini,
+  abstention detector, injeksi koreksi/PDF) **tidak diubah\*\* — hanya dipindahkan
+  ke lapisan service yang dipanggil lewat endpoint API, bukan lagi lewat widget
+  Streamlit.
 
 ```
 susenas-fastapi/
@@ -33,11 +34,23 @@ susenas-fastapi/
 │       └── services/
 │           └── rag_pipeline.py   <- PORTING LANGSUNG dari rag_pipeline.py Streamlit
 │
-└── frontend/                     <- UI statis (HTML/CSS/JS murni, tanpa build step)
-    ├── index.html
-    ├── css/styles.css
-    └── js/app.js
+└── frontend/                     <- UI React + Vite + Tailwind CSS v4 (BUTUH build step)
+    ├── index.html                <- me-load /src/main.jsx, TIDAK bisa dibuka langsung tanpa build
+    ├── package.json              <- npm run dev / npm run build / npm run preview
+    ├── vite.config.js
+    └── src/
+        ├── main.jsx, App.jsx
+        ├── api/client.js         <- API_BASE, wrapper apiFetch()
+        ├── context/              <- AuthContext, ChatRoomsContext, ToastContext, ConfirmContext
+        ├── components/           <- ChatView, InstructorView, RoomSidebar, dst.
+        └── utils/
 ```
+
+> Frontend versi lama (HTML/CSS/JS murni tanpa build step) sudah digantikan
+> penuh oleh React+Vite di atas — lihat `frontend/README.md` untuk detail
+> struktur & konvensi gaya (Tailwind v4). Konsekuensinya: frontend **wajib**
+> di-build (`npm run build`) sebelum bisa disajikan sebagai file statis
+> biasa oleh FastAPI atau hosting statis mana pun.
 
 ---
 
@@ -73,7 +86,24 @@ backend/data/qdrant_db/
 
 (`conversations.db` dan `kb_backups/` akan dibuat otomatis saat server pertama kali jalan.)
 
-## 3. Menjalankan server
+## 3. Build frontend (WAJIB sebelum menjalankan server satu-proses)
+
+Frontend sekarang React + Vite (lihat `frontend/README.md`), bukan lagi HTML/JS
+statis yang bisa langsung dibuka browser — `index.html` me-load `/src/main.jsx`
+lewat `<script type="module">`, yang butuh proses build supaya JSX & import
+`react`/`react-dom` diterjemahkan jadi JS biasa. Build dulu:
+
+```bash
+cd frontend
+npm install
+npm run build        # hasilnya di frontend/dist/
+```
+
+`app/main.py` mem-mount `frontend/dist/` (bukan folder `frontend/` mentah) sebagai
+file statis — kalau `dist/` belum ada, server tetap start tapi cuma API yang aktif
+(ada warning di log, dan membuka `http://localhost:8000/` akan 404).
+
+## 4. Menjalankan server
 
 Jalankan dari dalam folder `backend/` (penting — path data & accounts bersifat relatif terhadap folder ini, sama seperti kebiasaan `streamlit run app.py` sebelumnya):
 
@@ -90,20 +120,25 @@ Setelah server aktif:
 - **Dokumentasi API interaktif (Swagger UI)**: http://localhost:8000/docs
 - **Health check**: http://localhost:8000/api/health
 
-Frontend di `frontend/` **otomatis ikut disajikan** oleh FastAPI lewat static file mount di `app/main.py` — Anda tidak perlu menjalankan server terpisah untuk UI. Cukup satu perintah `uvicorn` di atas.
+Frontend hasil build (`frontend/dist/`) **otomatis ikut disajikan** oleh FastAPI lewat static file mount di `app/main.py` — Anda tidak perlu menjalankan server terpisah untuk UI, asalkan sudah menjalankan `npm run build` di langkah 3. Kalau frontend diedit lagi, ulangi `npm run build` supaya `dist/` ikut ter-update.
 
-### Menjalankan frontend secara terpisah (opsional)
+### Menjalankan frontend secara terpisah (mode development, live-reload)
 
-Kalau Anda ingin men-develop frontend dengan live-reload sendiri (mis. ekstensi "Live Server" VS Code di port 5500):
+Kalau Anda sedang mengembangkan tampilan dan ingin live-reload (tanpa build ulang tiap perubahan):
 
-1. Di `frontend/js/app.js`, ubah baris paling atas:
+1. Di `frontend/src/api/client.js`, ubah `API_BASE` ke URL backend Anda:
    ```js
-   const API_BASE = "http://localhost:8000";
+   export const API_BASE = "http://localhost:8000";
    ```
-2. Di `backend/.env`, isi `APP_CORS_ORIGINS=http://localhost:5500` (atau origin server statis Anda).
-3. Jalankan backend seperti biasa (`uvicorn ...`), dan buka `frontend/index.html` lewat server statis pilihan Anda (`python -m http.server` juga bisa).
+2. Di `backend/.env`, isi `APP_CORS_ORIGINS=http://localhost:5173` (port default Vite dev server; lihat `frontend/vite.config.js`).
+3. Jalankan backend seperti biasa (`uvicorn ...`), lalu di folder `frontend/`:
+   ```bash
+   npm install
+   npm run dev
+   ```
+   Vite akan menyajikan UI di `http://localhost:5173` dengan hot-reload, memanggil API ke `API_BASE` di atas.
 
-## 4. Akun & alur penggunaan
+## 5. Akun & alur penggunaan
 
 Struktur peran **identik** dengan versi Streamlit:
 
@@ -114,20 +149,20 @@ Login lewat `/api/v1/auth/login` mengembalikan JWT (`access_token`). Frontend me
 
 ---
 
-## 5. Highlight perubahan dibanding Streamlit
+## 6. Highlight perubahan dibanding Streamlit
 
-| Aspek | Streamlit (lama) | FastAPI (baru) |
-|---|---|---|
-| **Sesi login** | `st.session_state.account`, hidup selama tab browser terbuka & terikat proses server Streamlit | JWT stateless (`access_token`) tersimpan di `localStorage` browser; server tidak menyimpan sesi apa pun → lebih mudah di-scale ke banyak instance backend |
-| **Resource berat (model, index)** | `@st.cache_resource` — dibangun sekali per proses Streamlit | `lifespan` FastAPI membangun `PipelineResources` sekali saat server start, disimpan di `app.state.resources`, dipakai bersama semua request (`app/main.py`) |
-| **Validasi input** | Manual (`if not correction_text.strip(): st.warning(...)`) | **Pydantic** memvalidasi tipe & keharusan field secara otomatis di setiap endpoint (`schemas/auth.py`, `schemas/chat.py`) — request tidak valid ditolak sebelum menyentuh logika bisnis |
-| **Pemisahan UI vs logika** | UI (`st.write`, `st.chat_message`, dst.) bercampur dengan pemanggilan pipeline langsung di `app.py` | Backend **hanya** mengembalikan JSON; semua tampilan (bubble chat, badge verifikasi, tab instruktur) ada di `frontend/` — bisa diganti ke React/Vue/mobile kapan pun tanpa menyentuh backend |
-| **Dokumentasi API** | Tidak ada (harus baca kode) | Otomatis tersedia di **`/docs`** (Swagger UI) & **`/redoc`**, dihasilkan dari signature endpoint + schema Pydantic |
-| **Konkurensi / performa** | Streamlit pada dasarnya single-flow per rerun, kurang cocok untuk banyak user bersamaan | FastAPI (ASGI) menangani request secara asynchronous; endpoint I/O-bound (mis. upload PDF) bisa `async def` |
-| **Reaktivitas halaman** | Setiap interaksi (kirim pertanyaan, submit koreksi) memicu **`st.rerun()`** — seluruh halaman digambar ulang | Frontend hanya mem-fetch & merender ulang bagian yang relevan (daftar chat / daftar interaksi), tanpa reload halaman |
-| **Struktur kode** | 2 file besar (`app.py` UI + `rag_pipeline.py` logika) | Struktur berlapis: `api/` (routing) → `schemas/` (kontrak data) → `services/` (logika RAG, nyaris tidak berubah) → `core/` (config & auth) |
-| **Konfigurasi rahasia** | `.streamlit/secrets.toml` (API key + akun jadi satu) | Dipisah: `.env` untuk API key & JWT secret, `accounts.json` untuk daftar akun — lebih rapi untuk deployment (mis. secret manager) |
-| **Sumber jawaban (citation)** | `st.expander` berisi daftar sumber & konteks mentah | Endpoint mengembalikan `sources` sebagai array terstruktur (Pydantic `SourceItem`); frontend menampilkannya sebagai catatan kaki `[1] [2] [3]` yang bisa dibuka/tutup |
+| Aspek                             | Streamlit (lama)                                                                                             | FastAPI (baru)                                                                                                                                                                               |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Sesi login**                    | `st.session_state.account`, hidup selama tab browser terbuka & terikat proses server Streamlit               | JWT stateless (`access_token`) tersimpan di `localStorage` browser; server tidak menyimpan sesi apa pun → lebih mudah di-scale ke banyak instance backend                                    |
+| **Resource berat (model, index)** | `@st.cache_resource` — dibangun sekali per proses Streamlit                                                  | `lifespan` FastAPI membangun `PipelineResources` sekali saat server start, disimpan di `app.state.resources`, dipakai bersama semua request (`app/main.py`)                                  |
+| **Validasi input**                | Manual (`if not correction_text.strip(): st.warning(...)`)                                                   | **Pydantic** memvalidasi tipe & keharusan field secara otomatis di setiap endpoint (`schemas/auth.py`, `schemas/chat.py`) — request tidak valid ditolak sebelum menyentuh logika bisnis      |
+| **Pemisahan UI vs logika**        | UI (`st.write`, `st.chat_message`, dst.) bercampur dengan pemanggilan pipeline langsung di `app.py`          | Backend **hanya** mengembalikan JSON; semua tampilan (bubble chat, badge verifikasi, tab instruktur) ada di `frontend/` — bisa diganti ke React/Vue/mobile kapan pun tanpa menyentuh backend |
+| **Dokumentasi API**               | Tidak ada (harus baca kode)                                                                                  | Otomatis tersedia di **`/docs`** (Swagger UI) & **`/redoc`**, dihasilkan dari signature endpoint + schema Pydantic                                                                           |
+| **Konkurensi / performa**         | Streamlit pada dasarnya single-flow per rerun, kurang cocok untuk banyak user bersamaan                      | FastAPI (ASGI) menangani request secara asynchronous; endpoint I/O-bound (mis. upload PDF) bisa `async def`                                                                                  |
+| **Reaktivitas halaman**           | Setiap interaksi (kirim pertanyaan, submit koreksi) memicu **`st.rerun()`** — seluruh halaman digambar ulang | Frontend hanya mem-fetch & merender ulang bagian yang relevan (daftar chat / daftar interaksi), tanpa reload halaman                                                                         |
+| **Struktur kode**                 | 2 file besar (`app.py` UI + `rag_pipeline.py` logika)                                                        | Struktur berlapis: `api/` (routing) → `schemas/` (kontrak data) → `services/` (logika RAG, nyaris tidak berubah) → `core/` (config & auth)                                                   |
+| **Konfigurasi rahasia**           | `.streamlit/secrets.toml` (API key + akun jadi satu)                                                         | Dipisah: `.env` untuk API key & JWT secret, `accounts.json` untuk daftar akun — lebih rapi untuk deployment (mis. secret manager)                                                            |
+| **Sumber jawaban (citation)**     | `st.expander` berisi daftar sumber & konteks mentah                                                          | Endpoint mengembalikan `sources` sebagai array terstruktur (Pydantic `SourceItem`); frontend menampilkannya sebagai catatan kaki `[1] [2] [3]` yang bisa dibuka/tutup                        |
 
 **Yang TIDAK berubah** (sengaja dipertahankan apa adanya karena sudah benar secara desain):
 
@@ -136,8 +171,8 @@ Login lewat `/api/v1/auth/login` mengembalikan JWT (`access_token`). Frontend me
 
 ---
 
-## 6. Catatan keamanan (untuk dikembangkan lebih lanjut)
+## 7. Catatan keamanan (untuk dikembangkan lebih lanjut)
 
 - Password akun di `accounts.json` masih disimpan **plain text**, persis seperti `secrets.toml` sebelumnya. Untuk produksi, pertimbangkan hashing (mis. `passlib[bcrypt]`) sebelum dibandingkan di `authenticate()`.
 - Ganti `APP_JWT_SECRET_KEY` di `.env` dengan string acak yang panjang sebelum deploy — jangan pernah commit file `.env` atau `accounts.json` ke repo publik (sudah dimasukkan ke `.gitignore`).
-- `APP_CORS_ORIGINS=*` cocok untuk pengembangan lokal; batasi ke domain frontend Anda saat sudah live.
+- `APP_CORS_ORIGINS=*` cocok untuk pengembangan lokal; batasi ke domain frontend Anda saat sudah live. Autentikasi di sini pakai JWT lewat header `Authorization: Bearer <token>` (bukan cookie), jadi `CORSMiddleware` diset `allow_credentials=False` — kombinasi origin wildcard (`*`) dengan `allow_credentials=True` sebenarnya melanggar spesifikasi CORS browser dan tidak diperlukan di sini.

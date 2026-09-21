@@ -92,7 +92,16 @@ allow_origins = ["*"] if settings.cors_origins.strip() == "*" else [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
-    allow_credentials=True,
+    # allow_credentials=False -- autentikasi di sini pakai JWT lewat header
+    # `Authorization: Bearer <token>` (localStorage), BUKAN cookie, jadi
+    # frontend tidak pernah mengirim fetch dengan `credentials: "include"`.
+    # allow_credentials=True dikombinasikan dengan allow_origins=["*"] justru
+    # melanggar spesifikasi CORS browser (Access-Control-Allow-Origin: *
+    # tidak sah kalau Access-Control-Allow-Credentials: true) -- selama ini
+    # "aman" cuma karena kombinasi itu kebetulan tidak pernah benar-benar
+    # dipakai. Kalau nanti pindah ke auth berbasis cookie, aktifkan lagi
+    # bersamaan dengan mempersempit allow_origins ke domain frontend asli.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -112,8 +121,29 @@ def health() -> dict:
 # Mount PALING TERAKHIR & di path "/" supaya tidak menutupi route API di
 # atas (Starlette mencocokkan rute sesuai urutan didaftarkan). Dengan ini,
 # `uvicorn app.main:app` sudah menyajikan API sekaligus UI dari satu proses/port.
-FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+#
+# BUG YANG DIPERBAIKI: sebelumnya baris ini mem-mount folder `frontend/`
+# MENTAH (source Vite+React: index.html, src/*.jsx, dll). Itu cuma benar
+# untuk frontend vanilla JS versi lama (index.html + js/app.js yang bisa
+# langsung dibuka browser tanpa build step). Sejak frontend dikonversi ke
+# React (lihat frontend/README.md), `index.html` me-load `/src/main.jsx`
+# lewat `<script type="module">` -- browser TIDAK BISA menjalankan JSX
+# mentah atau me-resolve bare import seperti `import "react"` tanpa
+# bundler. Kalau folder source ini yang di-mount, halamannya akan
+# blank/error di console browser walau server start tanpa error apa pun.
+#
+# Yang benar: build dulu (`cd frontend && npm run build`), lalu sajikan
+# folder HASIL build-nya (`frontend/dist/`) yang isinya sudah berupa
+# HTML/JS/CSS statis siap pakai.
+FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if FRONTEND_DIST_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST_DIR), html=True), name="frontend")
 else:
-    logger.warning("Folder frontend tidak ditemukan di %s -- hanya API yang aktif.", FRONTEND_DIR)
+    logger.warning(
+        "Folder frontend/dist tidak ditemukan di %s -- hanya API yang aktif. "
+        "Jalankan `cd frontend && npm install && npm run build` dulu supaya "
+        "frontend ikut disajikan dari satu proses/port yang sama, atau "
+        "jalankan frontend secara terpisah lewat `npm run dev` (lihat "
+        "frontend/README.md).",
+        FRONTEND_DIST_DIR,
+    )
