@@ -125,19 +125,19 @@ class AbstentionConfig:
         if not self.reference_paraphrases:
             self.reference_paraphrases = [
                 self.exact_phrase,
+                "Maaf, saya tidak menemukan informasi terkait pertanyaan ini di dalam database."
                 "Informasi tersebut tidak tersedia dalam sumber data yang diberikan.",
                 "Maaf, informasi ini tidak terdapat dalam konteks yang diberikan.",
                 "Data mengenai hal ini tidak tersedia dalam knowledge base saat ini.",
                 "Pertanyaan ini tidak dapat dijawab berdasarkan konteks yang ada.",
                 "Konteks yang diberikan tidak memuat jawaban atas pertanyaan tersebut.",
-                "Saya tidak menemukan informasi terkait pertanyaan ini di dalam data.",
             ]
 
 
 GEMINI_KEY_NAMES = [
-    "GEMINI_API_KEY_TEMP07", "GEMINI_API_KEY", "GEMINI_API_KEY_TEMP04",
+    "GEMINI_API_KEY_NAB", "GEMINI_API_KEY", "GEMINI_API_KEY_TEMP04",
     "GEMINI_API_KEY_TEMP01", "GEMINI_API_KEY_TEMP02", "GEMINI_API_KEY_TEMP06",
-    "GEMINI_API_KEY_ZEF", "GEMINI_API_KEY_GLO", "GEMINI_API_KEY_NAB", "GEMINI_API_KEY_TEMP03",
+    "GEMINI_API_KEY_ZEF", "GEMINI_API_KEY_GLO", "GEMINI_API_KEY_TEMP07", "GEMINI_API_KEY_TEMP03",
 ]
 GROQ_KEY_NAMES = ["GROQ_API_KEY", "GROQ_API_KEY_ZEF", "GROQ_API_KEY_NAB", "GROQ_API_KEY_GLO"]
 
