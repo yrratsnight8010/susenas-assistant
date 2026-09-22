@@ -37,7 +37,7 @@ export default function LoginScreen() {
             Statistik &middot; RAG &middot; BPS
           </div>
           <h1 className="mt-2 mb-1.5 font-display text-[clamp(23px,4vw,27px)] leading-tight font-bold text-ink">
-            Susenas Maret 2025
+            Susenas Maret
           </h1>
           <p className="mt-3.5 text-[14px] leading-normal text-ink-soft">
             Asisten tanya-jawab data Susenas, dengan sumber yang selalu tertelusuri.

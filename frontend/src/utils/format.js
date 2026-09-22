@@ -35,10 +35,9 @@ export function timeOfDaySalutation() {
 }
 
 const OPENING_LINES = [
-  "Ada yang mau ditanyakan seputar Susenas Maret 2025?",
-  "Mau tanya soal pengeluaran, kemiskinan, ketenagakerjaan, atau topik Susenas lain?",
-  "Aku siap bantu telusuri data Susenas Maret 2025 -- tanyakan apa saja.",
-  "Coba tanyakan definisi, metodologi, atau angka tertentu dari Susenas Maret 2025.",
+  "Ada yang mau ditanyakan seputar Susenas Maret?",
+  "Aku siap bantu telusuri tentang Susenas Maret -- tanyakan apa saja.",
+  "Coba tanyakan definisi atau topik tertentu dari Susenas Maret.",
   "Silakan mulai dengan pertanyaanmu -- jawabannya akan disertai sumber yang tertelusuri.",
 ];
 

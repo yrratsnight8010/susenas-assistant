@@ -53,7 +53,7 @@ export default function AppShell() {
             <path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
           </svg>
         </button>
-        <div className="truncate font-display text-[15px] font-semibold text-ink">Susenas Maret 2025</div>
+        <div className="truncate font-display text-[15px] font-semibold text-ink">Susenas Maret</div>
       </header>
 
       <div
@@ -83,7 +83,7 @@ export default function AppShell() {
           {!rail && (
             <>
               <span className="min-w-0 font-display text-[16px] leading-tight font-semibold text-ink">
-                Susenas Maret&nbsp;2025
+                Susenas Maret
                 <span className="mt-0.5 block font-sans text-[12px] font-normal text-ink-soft">
                   Asisten Tanya-Jawab
                 </span>

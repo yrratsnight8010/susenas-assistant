@@ -1,3 +1,7 @@
+// Sementara disembunyikan untuk keperluan pengujian -- set balik ke true kalau
+// mau menampilkan lagi isi konteks yang dikirim ke LLM di bawah daftar sumber.
+const SHOW_RAW_CONTEXT = false;
+
 export default function Sources({ sources, context }) {
   if (!sources || sources.length === 0) {
     return <p className="my-[1em] text-[13px] text-ink-soft">Tidak ada sumber tercatat.</p>;
@@ -20,7 +24,7 @@ export default function Sources({ sources, context }) {
         ))}
       </ul>
 
-      {context && (
+      {SHOW_RAW_CONTEXT && context && (
         <details className="mt-2.5">
           <summary className="cursor-pointer font-mono text-[12.5px] text-ink-soft">
             Lihat isi konteks yang dikirim ke LLM

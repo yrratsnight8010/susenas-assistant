@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 import json
+import logging
 from fastapi.responses import StreamingResponse
 
 from app.core.security import require_role
@@ -8,6 +9,23 @@ from app.schemas.chat import AskRequest, AskResponse, InteractionDetail, RoomCre
 from app.services.rag_pipeline import PipelineResources, answer_question, answer_question_stream
 
 router = APIRouter()
+logger = logging.getLogger("chat")
+
+
+def _friendly_error_message(exc: Exception) -> str:
+    """
+    Ubah exception mentah (mis. error dari Gemini API yang penuh kode/JSON teknis)
+    jadi pesan yang enak dibaca user. Detail aslinya tetap dicatat lewat logger,
+    jadi tidak hilang untuk keperluan debugging -- cuma tidak ditampilkan ke user.
+    """
+    raw = str(exc).lower()
+    if any(kw in raw for kw in ["503", "overloaded", "unavailable", "high demand"]):
+        return "Server sedang sibuk, coba tanyakan lagi beberapa saat lagi."
+    if any(kw in raw for kw in ["429", "quota", "rate limit"]):
+        return "Terlalu banyak permintaan saat ini, coba lagi sebentar lagi."
+    if any(kw in raw for kw in ["timeout", "timed out", "deadline"]):
+        return "Permintaan memakan waktu terlalu lama. Coba tanyakan ulang."
+    return "Terjadi kesalahan saat memproses pertanyaan Anda. Coba lagi sebentar lagi."
 
 
 # ---------------------------------------------------------------------
@@ -92,9 +110,10 @@ def ask(
     try:
         result = answer_question(resources, payload.question)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Gagal memproses pertanyaan di /ask: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Terjadi kesalahan saat memproses pertanyaan Anda: {exc}",
+            detail=_friendly_error_message(exc),
         ) from exc
 
     resources.conversation_store.log_interaction(
@@ -158,9 +177,10 @@ def ask_stream(
                 else:
                     yield json.dumps({"type": "token", "text": item}) + "\n"
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Gagal memproses pertanyaan di /ask/stream: %s", exc)
             yield json.dumps({
                 "type": "error",
-                "detail": f"Terjadi kesalahan saat memproses pertanyaan Anda: {exc}",
+                "detail": _friendly_error_message(exc),
             }) + "\n"
 
     return StreamingResponse(
