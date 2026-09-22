@@ -1,18 +1,28 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch } from "../api/client.js";
 import { useConfirm } from "../context/ConfirmContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
 import { formatTimestamp } from "../utils/format.js";
 import Button from "./ui/Button.jsx";
 import { InlineActions, TableWrap, Td, Th, Tr } from "./ui/DataTable.jsx";
-import { textareaClass } from "./ui/Field.jsx";
+import { inputClass, textareaClass } from "./ui/Field.jsx";
 import { FormError, SpinnerNote } from "./ui/Notice.jsx";
+
+// Kolom yang dicocokkan pencarian di tab ini.
+function matchesSearch(item, needle) {
+  if (!needle) return true;
+  const haystack = `${item.corrected_by || ""} ${item.username || ""} ${item.original_question || ""} ${
+    item.correction_text || ""
+  }`.toLowerCase();
+  return haystack.includes(needle);
+}
 
 export default function CorrectionsLogTab({ active }) {
   const showToast = useToast();
   const confirmDialog = useConfirm();
   const [corrections, setCorrections] = useState(null);
   const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     setError("");
@@ -28,14 +38,34 @@ export default function CorrectionsLogTab({ active }) {
     if (active) load();
   }, [active, load]);
 
+  const needle = search.trim().toLowerCase();
+  const filtered = useMemo(
+    () => (corrections || []).filter((item) => matchesSearch(item, needle)),
+    [corrections, needle],
+  );
+
   return (
     <div>
+      {corrections !== null && corrections.length > 0 && (
+        <div className="mb-4 flex justify-end">
+          <input
+            type="search"
+            className={`${inputClass} max-w-[280px]`}
+            placeholder="Cari oleh / user / pertanyaan / koreksi..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+      )}
+
       {error ? (
         <FormError>{error}</FormError>
       ) : corrections === null ? (
         <SpinnerNote>Memuat log koreksi...</SpinnerNote>
       ) : corrections.length === 0 ? (
         <SpinnerNote>Belum ada koreksi yang tercatat.</SpinnerNote>
+      ) : filtered.length === 0 ? (
+        <SpinnerNote>Tidak ada hasil untuk pencarian "{search.trim()}".</SpinnerNote>
       ) : (
         <TableWrap>
           <thead>
@@ -49,7 +79,7 @@ export default function CorrectionsLogTab({ active }) {
             </tr>
           </thead>
           <tbody>
-            {corrections.map((item) => (
+            {filtered.map((item) => (
               <CorrectionRow
                 key={item.correction_id}
                 item={item}

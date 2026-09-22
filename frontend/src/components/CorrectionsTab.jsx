@@ -1,18 +1,26 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch } from "../api/client.js";
 import { useToast } from "../context/ToastContext.jsx";
 import { formatTimestamp } from "../utils/format.js";
 import Button from "./ui/Button.jsx";
 import { InlineActions, TableWrap, Td, Th, Tr } from "./ui/DataTable.jsx";
-import { textareaClass } from "./ui/Field.jsx";
+import { inputClass, textareaClass } from "./ui/Field.jsx";
 import { FormError, SpinnerNote } from "./ui/Notice.jsx";
 import Tag from "./ui/Tag.jsx";
+
+// Kolom yang dicocokkan pencarian di tab ini.
+function matchesSearch(item, needle) {
+  if (!needle) return true;
+  const haystack = `${item.username || ""} ${item.question || ""} ${item.answer || ""}`.toLowerCase();
+  return haystack.includes(needle);
+}
 
 export default function CorrectionsTab({ active }) {
   const showToast = useToast();
   const [onlyUncorrected, setOnlyUncorrected] = useState(true);
   const [interactions, setInteractions] = useState(null);
   const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     setError("");
@@ -28,16 +36,34 @@ export default function CorrectionsTab({ active }) {
     if (active) load();
   }, [active, load]);
 
+  const needle = search.trim().toLowerCase();
+  const filtered = useMemo(
+    () => (interactions || []).filter((item) => matchesSearch(item, needle)),
+    [interactions, needle],
+  );
+
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center gap-2 text-[13.5px] text-ink-soft">
-        <input
-          type="checkbox"
-          id="only-uncorrected"
-          checked={onlyUncorrected}
-          onChange={(event) => setOnlyUncorrected(event.target.checked)}
-        />
-        <label htmlFor="only-uncorrected">Hanya tampilkan yang belum dikoreksi</label>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 text-[13.5px] text-ink-soft">
+          <input
+            type="checkbox"
+            id="only-uncorrected"
+            checked={onlyUncorrected}
+            onChange={(event) => setOnlyUncorrected(event.target.checked)}
+          />
+          <label htmlFor="only-uncorrected">Hanya tampilkan yang belum dikoreksi</label>
+        </div>
+
+        {interactions !== null && interactions.length > 0 && (
+          <input
+            type="search"
+            className={`${inputClass} ml-auto max-w-[280px]`}
+            placeholder="Cari user / pertanyaan / jawaban..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        )}
       </div>
 
       {error ? (
@@ -46,6 +72,8 @@ export default function CorrectionsTab({ active }) {
         <SpinnerNote>Memuat percakapan...</SpinnerNote>
       ) : interactions.length === 0 ? (
         <SpinnerNote>Belum ada percakapan yang tercatat.</SpinnerNote>
+      ) : filtered.length === 0 ? (
+        <SpinnerNote>Tidak ada hasil untuk pencarian "{search.trim()}".</SpinnerNote>
       ) : (
         <TableWrap>
           <thead>
@@ -59,7 +87,7 @@ export default function CorrectionsTab({ active }) {
             </tr>
           </thead>
           <tbody>
-            {interactions.map((item) => (
+            {filtered.map((item) => (
               <InteractionRow key={item.id} item={item} onChanged={load} showToast={showToast} />
             ))}
           </tbody>
