@@ -20,8 +20,97 @@ export function AnswerCard({ children }) {
   );
 }
 
+// Render sederhana untuk **bold** di dalam satu baris teks (tanpa dependency
+// markdown eksternal). Mengembalikan array string/<strong> untuk dipakai
+// sebagai children React.
+function renderInline(text, keyPrefix) {
+  const parts = text.split(/(\*\*[^*\n]+\*\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return <strong key={`${keyPrefix}-${i}`}>{part.slice(2, -2)}</strong>;
+    }
+    return <span key={`${keyPrefix}-${i}`}>{part}</span>;
+  });
+}
+
+// Jawaban chatbot sering memakai format ala-markdown (**bold**, daftar "* "
+// atau "1. "). Sebelumnya teks ini ditampilkan mentah (whitespace-pre-wrap)
+// jadi tanda ** dan * ikut tercetak apa adanya. Fungsi ini mengelompokkan
+// baris jadi paragraf/daftar dan me-render **bold** dengan benar.
 export function AnswerText({ children }) {
-  return <div className="text-[15px] whitespace-pre-wrap break-anywhere">{children}</div>;
+  if (typeof children !== "string") {
+    return <div className="text-[15px] whitespace-pre-wrap break-anywhere">{children}</div>;
+  }
+
+  const lines = children.split("\n");
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const bulletMatch = /^[*-]\s+(.*)/.exec(lines[i].trim());
+    const numberedMatch = /^\d+[.)]\s+(.*)/.exec(lines[i].trim());
+
+    if (bulletMatch) {
+      const items = [];
+      while (i < lines.length) {
+        const m = /^[*-]\s+(.*)/.exec(lines[i].trim());
+        if (!m) break;
+        items.push(m[1]);
+        i += 1;
+      }
+      blocks.push({ type: "ul", items });
+      continue;
+    }
+
+    if (numberedMatch) {
+      const items = [];
+      while (i < lines.length) {
+        const m = /^\d+[.)]\s+(.*)/.exec(lines[i].trim());
+        if (!m) break;
+        items.push(m[1]);
+        i += 1;
+      }
+      blocks.push({ type: "ol", items });
+      continue;
+    }
+
+    if (lines[i].trim() === "") {
+      i += 1;
+      continue;
+    }
+
+    blocks.push({ type: "p", text: lines[i] });
+    i += 1;
+  }
+
+  return (
+    <div className="text-[15px] break-anywhere">
+      {blocks.map((block, idx) => {
+        if (block.type === "ul") {
+          return (
+            <ul key={idx} className="my-2 list-disc space-y-1 pl-5 first:mt-0 last:mb-0">
+              {block.items.map((item, j) => (
+                <li key={j}>{renderInline(item, `${idx}-${j}`)}</li>
+              ))}
+            </ul>
+          );
+        }
+        if (block.type === "ol") {
+          return (
+            <ol key={idx} className="my-2 list-decimal space-y-1 pl-5 first:mt-0 last:mb-0">
+              {block.items.map((item, j) => (
+                <li key={j}>{renderInline(item, `${idx}-${j}`)}</li>
+              ))}
+            </ol>
+          );
+        }
+        return (
+          <p key={idx} className="my-1.5 first:mt-0 last:mb-0">
+            {renderInline(block.text, String(idx))}
+          </p>
+        );
+      })}
+    </div>
+  );
 }
 
 // Baris status di bawah jawaban: titik kecil + keterangan.
