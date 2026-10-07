@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
+import { useConfirm } from "../context/ConfirmContext.jsx";
 import { cx } from "../utils/cx.js";
 import { useMediaQuery } from "../utils/useMediaQuery.js";
 import ChatView from "./ChatView.jsx";
@@ -16,6 +17,7 @@ export default function AppShell() {
   const { username, role, logout } = useAuth();
   const isInstructor = role === "instruktur";
   const isDesktop = useMediaQuery(DESKTOP_QUERY);
+  const confirmDialog = useConfirm();
 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1");
@@ -36,6 +38,18 @@ export default function AppShell() {
 
   function closeMobileSidebarIfNeeded() {
     if (!isDesktop) setMobileOpen(false);
+  }
+
+  async function handleLogout() {
+    const confirmed = await confirmDialog({
+      title: "Keluar dari akun?",
+      body: "Anda akan keluar dari akun ini dan perlu login kembali untuk melanjutkan.",
+      confirmLabel: "Keluar",
+      danger: true,
+    });
+    if (!confirmed) return;
+    closeMobileSidebarIfNeeded();
+    logout();
   }
 
   return (
@@ -154,10 +168,7 @@ export default function AppShell() {
               block={!rail}
               title="Keluar"
               aria-label="Keluar"
-              onClick={() => {
-                closeMobileSidebarIfNeeded();
-                logout();
-              }}
+              onClick={handleLogout}
             >
               <svg viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true">
                 <path

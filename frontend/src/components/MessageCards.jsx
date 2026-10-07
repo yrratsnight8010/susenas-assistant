@@ -114,16 +114,19 @@ export function AnswerText({ children }) {
 }
 
 // Baris status di bawah jawaban: titik kecil + keterangan.
-export function StatusRow({ verified = false, children }) {
+// tone: "unverified" (abu-abu), "verified" (hijau), "corrected" (oranye).
+const STATUS_TONES = {
+  unverified: { dot: "border-ink-soft", text: undefined },
+  verified: { dot: "border-success bg-success", text: "text-success" },
+  corrected: { dot: "border-action bg-action", text: "text-action" },
+};
+
+export function StatusRow({ tone = "unverified", children }) {
+  const style = STATUS_TONES[tone] || STATUS_TONES.unverified;
   return (
     <div className="mt-[9px] flex flex-wrap items-center gap-2 text-[12.5px] text-ink-soft">
-      <span
-        className={cx(
-          "inline-block size-[7px] shrink-0 rounded-full border-[1.5px]",
-          verified ? "border-action bg-action" : "border-ink-soft",
-        )}
-      />
-      <span className={verified ? "text-action" : undefined}>{children}</span>
+      <span className={cx("inline-block size-[7px] shrink-0 rounded-full border-[1.5px]", style.dot)} />
+      <span className={style.text}>{children}</span>
     </div>
   );
 }

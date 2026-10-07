@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 import json
 import logging
+import queue
+import threading
 from fastapi.responses import StreamingResponse
 
 from app.core.security import require_role
-from app.dependencies import get_resources, to_source_items
+from app.dependencies import get_resources, sources_for_user, to_source_items
 from app.schemas.chat import AskRequest, AskResponse, InteractionDetail, RoomCreate, RoomOut
 from app.services.rag_pipeline import PipelineResources, answer_question, answer_question_stream
 
@@ -128,8 +130,7 @@ def ask(
 
     return AskResponse(
         answer=result["answer"],
-        context=result["context"],
-        sources=to_source_items(result["sources"]),
+        sources=[] if result["is_abstained"] else to_source_items(result["sources"]),
         is_abstained=result["is_abstained"],
     )
 
@@ -153,35 +154,51 @@ def ask_stream(
             detail="Room percakapan tidak ditemukan.",
         )
 
-    def event_stream():
+    # Generasi dijalankan di thread pekerja yang MENCATAT interaksi sendiri
+    # begitu jawaban selesai. Dengan begitu, kalau klien terputus di tengah
+    # stream (mis. petugas me-refresh halaman sebelum jawaban selesai),
+    # pertanyaan & jawabannya tetap tersimpan dan bisa ditinjau instruktur.
+    username = user["username"]
+    room_id = payload.room_id
+    question = payload.question
+    events: "queue.Queue[dict | None]" = queue.Queue()
+
+    def worker() -> None:
         try:
-            for item in answer_question_stream(resources, payload.question):
+            for item in answer_question_stream(resources, question):
                 if isinstance(item, dict) and item.get("__final__"):
                     resources.conversation_store.log_interaction(
-                        username=user["username"],
-                        room_id=payload.room_id,
-                        question=payload.question,
+                        username=username,
+                        room_id=room_id,
+                        question=question,
                         answer=item["answer"],
                         context=item["context"],
                         is_abstained=item["is_abstained"],
                         sources=item["sources"],
                     )
-                    source_items = [s.model_dump() for s in to_source_items(item["sources"])]
-                    yield json.dumps({
+                    visible_sources = [] if item["is_abstained"] else item["sources"]
+                    events.put({
                         "type": "done",
                         "answer": item["answer"],
-                        "context": item["context"],
-                        "sources": source_items,
+                        "sources": [s.model_dump() for s in to_source_items(visible_sources)],
                         "is_abstained": item["is_abstained"],
-                    }) + "\n"
+                    })
                 else:
-                    yield json.dumps({"type": "token", "text": item}) + "\n"
+                    events.put({"type": "token", "text": item})
         except Exception as exc:  # noqa: BLE001
             logger.exception("Gagal memproses pertanyaan di /ask/stream: %s", exc)
-            yield json.dumps({
-                "type": "error",
-                "detail": _friendly_error_message(exc),
-            }) + "\n"
+            events.put({"type": "error", "detail": _friendly_error_message(exc)})
+        finally:
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True, name="ask-stream-worker").start()
+
+    def event_stream():
+        while True:
+            event = events.get()
+            if event is None:
+                break
+            yield json.dumps(event) + "\n"
 
     return StreamingResponse(
         event_stream(),
@@ -213,8 +230,8 @@ def history(
     interactions = resources.conversation_store.list_interactions_for_room(room_id, user["username"])
     return [
         InteractionDetail(
-            **{k: v for k, v in item.items() if k != "sources"},
-            sources=to_source_items(item["sources"]),
+            **{k: v for k, v in item.items() if k not in ("sources", "context")},
+            sources=sources_for_user(item),
         )
         for item in interactions
     ]

@@ -35,16 +35,19 @@ class AskRequest(BaseModel):
 
 
 class AskResponse(BaseModel):
+    """Respons /ask untuk petugas. Isi konteks yang dikirim ke LLM TIDAK
+    disertakan (hanya tersimpan di database untuk keperluan pengembangan).
+    Untuk jawaban abstain, `sources` selalu kosong."""
+
     answer: str
-    context: str
     sources: list[SourceItem]
     is_abstained: bool
 
 
 class InteractionSummary(BaseModel):
-    """Ringkasan 1 interaksi untuk daftar tinjauan instruktur -- TANPA
-    konteks/sumber lengkap, sama seperti query ringan `list_interactions`
-    di rag_pipeline.py."""
+    """Satu interaksi untuk tab Tinjau Percakapan (instruktur), lengkap
+    dengan status verifikasi dan data koreksi bila ada -- tanpa
+    konteks/sumber."""
 
     id: str
     timestamp: str
@@ -52,15 +55,33 @@ class InteractionSummary(BaseModel):
     question: str
     answer: str
     is_abstained: bool
-    corrected: bool
+    # unverified | verified | corrected
+    status: str = "unverified"
+    corrected: bool = False
     verified: bool = False
+    verified_by: Optional[str] = None
+    verified_at: Optional[str] = None
+    correction_id: Optional[str] = None
+    correction_text: Optional[str] = None
+    corrected_by: Optional[str] = None
+    correction_date: Optional[str] = None
+    correction_at: Optional[str] = None
 
 
-class InteractionDetail(InteractionSummary):
-    """Riwayat percakapan lengkap milik satu user, termasuk konteks,
-    sumber, dan status koreksi/verifikasi -- dipakai di /chat/history."""
+class InteractionDetail(BaseModel):
+    """Riwayat percakapan milik satu petugas -- dipakai di /chat/history.
+    Tidak memuat konteks LLM. `sources` kosong untuk jawaban abstain, dan
+    berisi label koreksi instruktur untuk jawaban yang sudah dikoreksi."""
 
-    context: str
+    id: str
+    timestamp: str
+    username: str
+    question: str
+    answer: str
+    is_abstained: bool
+    status: str = "unverified"
+    corrected: bool = False
+    verified: bool = False
     sources: list[SourceItem]
     correction_text: Optional[str] = None
     corrected_by: Optional[str] = None
@@ -70,8 +91,10 @@ class InteractionDetail(InteractionSummary):
 
 
 class CorrectionRequest(BaseModel):
+    """Pertanyaan asli diambil server dari database berdasarkan
+    interaction_id (bukan dari kiriman klien)."""
+
     interaction_id: str = Field(..., min_length=1)
-    question: str = Field(..., min_length=1)
     correction_text: str = Field(..., min_length=1)
 
 
@@ -82,10 +105,9 @@ class CorrectionResponse(BaseModel):
 
 
 class VerifyRequest(BaseModel):
-    """Dipakai saat jawaban chatbot SUDAH BENAR apa adanya -- instruktur
-    cukup menandai terverifikasi tanpa menulis koreksi & tanpa
-    menyuntikkan chunk baru ke Knowledge Base (beda dengan /correct,
-    yang mengganti jawaban DAN menambah pengetahuan baru)."""
+    """Dipakai untuk menandai Verified (jawaban chatbot sudah benar
+    apa adanya, tanpa koreksi & tanpa chunk baru di KB) maupun untuk
+    membatalkan verifikasi (kembali Unverified)."""
 
     interaction_id: str = Field(..., min_length=1)
 
@@ -102,22 +124,6 @@ class PDFUploadResponse(BaseModel):
     chunk_ids: list[str]
 
 
-class CorrectionLogItem(BaseModel):
-    """Satu baris di log koreksi -- untuk GET /instructor/corrections,
-    supaya instruktur bisa meninjau (dan mencabut lewat DELETE
-    /instructor/corrections/{correction_id}) koreksi yang ternyata salah."""
-
-    correction_id: str
-    interaction_id: str
-    chunk_id: str
-    correction_text: str
-    corrected_by: str
-    correction_date: str
-    correction_at: Optional[str] = None
-    username: str
-    original_question: str
-
-
 class DeleteCorrectionResponse(BaseModel):
     correction_id: str
     chunk_id: str
@@ -131,3 +137,23 @@ class CorrectionUpdateRequest(BaseModel):
     interaksi terkait kembali muncul sebagai 'belum dikoreksi')."""
 
     correction_text: str = Field(..., min_length=1)
+
+
+class KBDocumentItem(BaseModel):
+    """Satu baris di tab Kelola KB. kind: base (KB awal, terkunci) |
+    upload (PDF unggahan, bisa dihapus) | correction (seluruh chunk
+    koreksi, dikelola dari tab Tinjau Percakapan)."""
+
+    document_id: str
+    display_name: str
+    kind: str
+    document_year: Optional[int] = None
+    chunk_count: int
+    created_at: Optional[str] = None
+    deletable: bool
+
+
+class DeleteKBDocumentResponse(BaseModel):
+    document_id: str
+    chunks_deleted: int
+    status: str = "ok"

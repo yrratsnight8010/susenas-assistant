@@ -1,5 +1,39 @@
 # Asisten Susenas Maret 2025 — FastAPI Edition
 
+## Perubahan terbaru
+
+**Pipeline & generation**
+
+- Reranker dihapus. Konfigurasi final: semantic 5 + BM25 5 → RRF (k=60) → 5 kandidat teratas menjadi konteks.
+- Generation mengikuti run evaluasi: thinking level `low`, temperature bawaan model (`GenerationConfig.temperature = None`; isi angka untuk memaksa nilai tertentu).
+- Frasa referensi detektor abstain kembali 7 (sebelumnya dua frasa menyatu karena koma hilang).
+- `chunk_id` koreksi = `CORR_` + SHA-1(`interaction_id` + teks koreksi)[:10], sehingga dua interaksi dengan koreksi identik tidak berbagi satu chunk.
+- Sumber KB awal tampil dengan nama lengkap: _Buku 4 Pedoman Susenas Maret 2025_ dan _Rangkuman Penegasan Permasalahan 2025_.
+
+**Tampilan petugas**
+
+- Isi konteks LLM tidak lagi dikirim ke petugas; label "Sumber & konteks" menjadi "Sumber".
+- Jawaban abstain tidak menampilkan sumber. Jawaban Corrected menampilkan label koreksi instruktur sebagai sumbernya.
+- Status: Unverified (abu-abu), Verified (hijau), Corrected (oranye).
+
+**Panel instruktur**
+
+- Tab _Koreksi Jawaban_ dan _Log Koreksi_ digabung menjadi **Tinjau Percakapan**; _Tambah Dokumen_ menjadi **Kelola KB** (ditambah daftar dokumen dan hapus dokumen unggahan).
+- Endpoint baru: `POST /instructor/unverify`, `GET /instructor/kb/documents`, `DELETE /instructor/kb/documents?document_id=...`. `GET /instructor/interactions` memakai parameter `status` (all | unverified | verified | corrected) dan menyertakan data koreksi; `GET /instructor/corrections` dihapus.
+- `/instructor/correct` mengambil pertanyaan asli dari database (tidak lagi dari kiriman klien) dan menolak transisi status yang tidak valid (409).
+- Dialog konfirmasi untuk semua aksi penting.
+
+**Perbaikan teknis**
+
+- Timestamp disimpan UTC dengan penanda zona; frontend menampilkannya sesuai zona waktu browser. Tanggal koreksi memakai WIB.
+- Unggah PDF dan hapus dokumen berjalan batch (embedding sekaligus, satu kali tulis Qdrant/JSON, satu kali rebuild BM25; hasil stemming di-cache per chunk) dan tidak lagi memblokir server.
+- Hapus percakapan oleh petugas bersifat _soft delete_: interaksi dan koreksinya tetap bisa ditinjau instruktur.
+- Interaksi dicatat oleh thread pekerja, sehingga tetap tersimpan walau petugas me-refresh halaman saat jawaban masih streaming.
+- Server menolak start bila `APP_JWT_SECRET_KEY` kosong/placeholder. Alamat backend frontend bisa diatur lewat `VITE_API_BASE`.
+- Dependensi `groq` dan `optimum` serta berkas Hugging Face Spaces (Dockerfile) dihapus.
+
+---
+
 Migrasi dari aplikasi Streamlit lama ke arsitektur \*\*backend FastAPI (REST API)
 
 - frontend statis terpisah**. Logika RAG (retrieval hybrid, generation Gemini,
@@ -30,7 +64,7 @@ susenas-fastapi/
 │       ├── api/v1/
 │       │   ├── auth.py           <- POST /api/v1/auth/login, GET /me
 │       │   ├── chat.py           <- POST /api/v1/chat/ask, GET /history (role: user)
-│       │   └── instructor.py     <- GET/POST koreksi & upload PDF (role: instruktur)
+│       │   └── instructor.py     <- tinjau percakapan, verify/unverify, koreksi, kelola KB (role: instruktur)
 │       └── services/
 │           └── rag_pipeline.py   <- PORTING LANGSUNG dari rag_pipeline.py Streamlit
 │
@@ -112,7 +146,7 @@ cd backend
 uvicorn app.main:app --reload --port 8000
 ```
 
-Proses pertama akan lebih lama karena memuat model embedding & reranker (sama seperti loading spinner "menyiapkan sistem" di versi Streamlit) — cukup terjadi sekali, bukan setiap request.
+Proses pertama akan lebih lama karena memuat model embedding (sama seperti loading spinner "menyiapkan sistem" di versi Streamlit) — cukup terjadi sekali, bukan setiap request.
 
 Setelah server aktif:
 
@@ -143,7 +177,11 @@ Kalau Anda sedang mengembangkan tampilan dan ingin live-reload (tanpa build ulan
 Struktur peran **identik** dengan versi Streamlit:
 
 - **role `user`** → melihat halaman Tanya-Jawab (chat), riwayatnya tersimpan di server (bukan `st.session_state`) sehingga tidak hilang saat logout/refresh.
-- **role `instruktur`** → melihat panel "Koreksi Jawaban" dan "Tambah Dokumen"; tidak melihat chat. Untuk tiap interaksi yang belum ditindak, instruktur punya 2 pilihan: **"✓ Tandai Sudah Benar"** (kalau jawaban chatbot sudah tepat apa adanya — tidak menulis apa pun, tidak menyuntikkan chunk baru ke KB, cuma menandai status) atau **isi form koreksi** (kalau jawaban perlu diganti — ini yang menyuntikkan chunk baru ke KB seperti dijelaskan di bawah).
+- **role `instruktur`** → melihat panel dengan dua tab, tanpa chat:
+  - **Tinjau Percakapan**: seluruh percakapan semua petugas, dengan filter status. Status jawaban ada tiga: **Unverified** (belum ditinjau), **Verified** (hijau; ditandai sudah benar apa adanya, tanpa chunk baru di KB; bisa dibatalkan kembali ke Unverified), dan **Corrected** (oranye; jawaban diganti koreksi yang disuntikkan sebagai chunk baru ke KB; koreksinya bisa diedit atau dihapus langsung dari baris yang sama, dan menghapusnya mengembalikan status ke Unverified). Jawaban berstatus Verified harus dibatalkan dulu sebelum bisa dikoreksi.
+  - **Kelola KB**: unggah PDF baru, serta melihat dan menghapus dokumen unggahan. KB awal (Buku 4 dan Rangkuman Penegasan) terkunci dan tidak bisa dihapus dari sini; chunk koreksi dikelola dari tab Tinjau Percakapan.
+
+Setiap aksi penting (keluar, hapus, verifikasi, simpan/edit koreksi, unggah) meminta konfirmasi lebih dulu.
 
 Login lewat `/api/v1/auth/login` mengembalikan JWT (`access_token`). Frontend menyimpannya di `localStorage` dan mengirimkannya di header `Authorization: Bearer <token>` pada setiap request berikutnya — inilah pengganti `st.session_state.account`.
 
@@ -166,7 +204,7 @@ Login lewat `/api/v1/auth/login` mengembalikan JWT (`access_token`). Frontend me
 
 **Yang TIDAK berubah** (sengaja dipertahankan apa adanya karena sudah benar secara desain):
 
-- Seluruh isi `rag_pipeline.py` (hybrid retrieval RRF + reranker, prioritas sumber koreksi > dokumen > KB dasar, rotasi API key, abstention detector, `ConversationStore` berbasis SQLite) — dipindah ke `app/services/rag_pipeline.py` **tanpa perubahan logika**, karena file itu memang sudah tidak bergantung pada Streamlit sama sekali di versi lama Anda.
+- Inti `rag_pipeline.py` (hybrid retrieval, rotasi API key, abstention detector, `ConversationStore` berbasis SQLite) dipindah ke `app/services/rag_pipeline.py`. Perubahan terhadap versi sebelumnya dirangkum di bagian _Perubahan terbaru_ di bawah.
 - Aturan prompt sistem Gemini (`build_system_prompt`) dan strategi chunking PDF (`inject_pdf`).
 
 ---

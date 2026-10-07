@@ -25,20 +25,22 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, PointIdsList
 from rank_bm25 import BM25Okapi
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from sentence_transformers import SentenceTransformer
 from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
 from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 from pypdf import PdfReader
@@ -47,7 +49,6 @@ import torch
 
 from google import genai
 from google.genai import types as genai_types
-from groq import Groq
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +73,46 @@ def _timed(label: str):
 # KONFIGURASI
 # =====================================================================
 
+# Zona waktu WIB (UTC+7), dipakai untuk tanggal koreksi yang ditampilkan ke
+# pengguna & dibaca LLM. Offset tetap dipakai (bukan zoneinfo) supaya tidak
+# bergantung pada paket tzdata di mesin tempat backend berjalan (mis. Colab).
+WIB = timezone(timedelta(hours=7))
+
+
+def utc_now_iso() -> str:
+    """Timestamp UTC dengan penanda zona (`...+00:00`) -- aman dibaca
+    browser di zona waktu mana pun (`new Date(iso)`)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def wib_today() -> str:
+    """Tanggal hari ini menurut WIB (YYYY-MM-DD)."""
+    return datetime.now(WIB).strftime("%Y-%m-%d")
+
+
+# Nama lengkap sumber yang ditampilkan ke pengguna.
+BUKU4_DISPLAY_NAME = "Buku 4 Pedoman Susenas Maret 2025"
+PENEGASAN_DISPLAY_NAME = "Rangkuman Penegasan Permasalahan 2025"
+
+
+def resolve_document_display_name(meta: dict[str, Any]) -> Optional[str]:
+    """Kembalikan nama lengkap sumber untuk chunk KB AWAL (Buku 4 /
+    Penegasan), atau None kalau chunk bukan dari keduanya. Dokumen
+    unggahan instruktur dan koreksi sengaja TIDAK dipetakan, supaya nama
+    yang diketik instruktur (mis. "Penegasan_Tambahan_2026") tampil apa
+    adanya."""
+    source = str(meta.get("source") or "")
+    if source in ("uploaded_pdf", "human_correction"):
+        return None
+    for raw in (meta.get("document_id"), source):
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(raw or "").lower()).strip()
+        if "penegasan" in normalized:
+            return PENEGASAN_DISPLAY_NAME
+        if re.search(r"\bbuku\s*4\b", normalized):
+            return BUKU4_DISPLAY_NAME
+    return None
+
+
 @dataclass
 class AppPaths:
     """Path untuk versi deployment -- jauh lebih ringkas dari
@@ -93,23 +134,22 @@ class RetrievalConfig:
     qdrant_db_path: str
     collection_name: str = "susenas_knowledgebase"
     embedding_model_name: str = "BAAI/bge-m3"
-    reranker_model_name: str = "BAAI/bge-reranker-base"
+    # Konfigurasi final hasil evaluasi: semantic 5 + BM25 5 -> RRF (k=60)
+    # -> 5 kandidat teratas jadi konteks. Tanpa reranker.
     top_k_semantic: int = 5
     top_k_bm25: int = 5
-    final_top_k: int = 3  # jumlah kandidat yang di-rerank -- makin kecil, makin cepat
-                          # (reranker jalan sebanyak angka ini kali per pertanyaan)
     rrf_k: int = 60
-    top_k_rerank: int = 3  # jumlah kandidat FINAL setelah rerank -- dinaikkan dari 3 ke 5
-                           # supaya kalau ada 2 chunk yang membahas topik sama tapi
-                           # bertentangan (mis. koreksi lama vs koreksi baru), keduanya
-                           # punya peluang lebih besar sama-sama lolos ke context block,
-                           # bukan cuma salah satu yang menang murni lewat rerank_score.
+    final_top_k: int = 5
 
 
 @dataclass
 class GenerationConfig:
     gemini_model: str = "gemini-3.6-flash"
-    temperature: float = 0.0
+    # None = pakai temperature bawaan model (sama dengan run evaluasi).
+    # Isi angka (mis. 0.0) kalau ingin dipaksa deterministik.
+    temperature: Optional[float] = None
+    # Level thinking Gemini: minimal | low | medium | high (sama dengan evaluasi: low).
+    thinking_level: str = "low"
     max_output_tokens: int = 2048
     not_available_answer: str = "Jawaban tidak tersedia dalam sumber data yang diberikan."
     max_retries_per_key: int = 2
@@ -125,7 +165,7 @@ class AbstentionConfig:
         if not self.reference_paraphrases:
             self.reference_paraphrases = [
                 self.exact_phrase,
-                "Maaf, saya tidak menemukan informasi terkait pertanyaan ini di dalam database."
+                "Maaf, saya tidak menemukan informasi terkait pertanyaan ini di dalam database.",
                 "Informasi tersebut tidak tersedia dalam sumber data yang diberikan.",
                 "Maaf, informasi ini tidak terdapat dalam konteks yang diberikan.",
                 "Data mengenai hal ini tidak tersedia dalam knowledge base saat ini.",
@@ -139,7 +179,6 @@ GEMINI_KEY_NAMES = [
     "GEMINI_API_KEY_TEMP04","GEMINI_API_KEY_TEMP01", "GEMINI_API_KEY_TEMP02", 
     "GEMINI_API_KEY_ZEF", "GEMINI_API_KEY_GLO", "GEMINI_API_KEY_TEMP03",
 ]
-GROQ_KEY_NAMES = ["GROQ_API_KEY", "GROQ_API_KEY_ZEF", "GROQ_API_KEY_NAB", "GROQ_API_KEY_GLO"]
 
 
 # =====================================================================
@@ -271,31 +310,62 @@ def call_with_key_rotation(
 # =====================================================================
 
 class HybridRetriever:
-    """Menggabungkan semantic search (Qdrant) + BM25 + RRF fusion +
-    cross-encoder reranking."""
+    """Menggabungkan semantic search (Qdrant) + BM25 + RRF fusion.
+
+    Konfigurasi final hasil evaluasi: semantic 5, BM25 5, RRF k=60, lalu
+    5 kandidat teratas hasil RRF langsung menjadi konteks generation --
+    TANPA reranker (reranker dibuang karena menambah latensi tanpa
+    peningkatan metrik retrieval pada konfigurasi final)."""
 
     def __init__(
         self,
         config: RetrievalConfig,
         embedding_model: SentenceTransformer,
         qdrant_client: QdrantClient,
-        reranker: CrossEncoder,
         chunks: list[dict[str, Any]],
         text_preprocessor: IndonesianTextPreprocessor,
     ):
         self.config = config
         self.embedding_model = embedding_model
         self.qdrant_client = qdrant_client
-        self.reranker = reranker
         self.chunks = chunks
         self.text_preprocessor = text_preprocessor
-        self.bm25_index: Optional[BM25Okapi] = None
+        # Cache hasil tokenisasi per chunk_id: stemming Sastrawi mahal, jadi
+        # saat BM25 dibangun ulang (tiap injeksi/hapus chunk) hanya chunk
+        # BARU yang perlu di-stem, bukan seluruh korpus.
+        self._token_cache: dict[str, list[str]] = {}
+        # (indeks BM25, salinan daftar chunk saat indeks dibangun) -- disimpan
+        # sebagai SATU tuple supaya pencarian BM25 yang berjalan bersamaan
+        # dengan injeksi/hapus chunk selalu melihat indeks dan daftar chunk
+        # yang konsisten (indeks skor selalu cocok dengan chunk-nya).
+        self._bm25_state: tuple[Optional[BM25Okapi], list[dict[str, Any]]] = (None, [])
         self.rebuild_bm25()
 
+    @property
+    def bm25_index(self) -> Optional[BM25Okapi]:
+        return self._bm25_state[0]
+
+    def _tokens_for(self, chunk: dict[str, Any]) -> list[str]:
+        chunk_id = chunk["chunk_id"]
+        tokens = self._token_cache.get(chunk_id)
+        if tokens is None:
+            tokens = self.text_preprocessor.tokenize(chunk["text"])
+            self._token_cache[chunk_id] = tokens
+        return tokens
+
     def rebuild_bm25(self) -> None:
-        corpus = [self.text_preprocessor.tokenize(c["text"]) for c in self.chunks]
-        self.bm25_index = BM25Okapi(corpus)
-        logger.info("BM25 index siap: %d dokumen.", len(self.chunks))
+        snapshot = list(self.chunks)
+        if not snapshot:
+            self._bm25_state = (None, [])
+            self._token_cache.clear()
+            logger.warning("BM25 index kosong: tidak ada chunk di Knowledge Base.")
+            return
+        corpus = [self._tokens_for(c) for c in snapshot]
+        self._bm25_state = (BM25Okapi(corpus), snapshot)
+        live_ids = {c["chunk_id"] for c in snapshot}
+        for stale_id in [cid for cid in self._token_cache if cid not in live_ids]:
+            del self._token_cache[stale_id]
+        logger.info("BM25 index siap: %d dokumen.", len(snapshot))
 
     def semantic_search(self, query: str) -> list[dict[str, Any]]:
         cfg = self.config
@@ -319,8 +389,10 @@ class HybridRetriever:
 
     def bm25_search(self, query: str) -> list[dict[str, Any]]:
         cfg = self.config
-        assert self.bm25_index is not None, "BM25 index belum dibangun."
-        scores = self.bm25_index.get_scores(self.text_preprocessor.tokenize(query))
+        bm25_index, snapshot = self._bm25_state
+        if bm25_index is None:
+            return []
+        scores = bm25_index.get_scores(self.text_preprocessor.tokenize(query))
 
         k = min(cfg.top_k_bm25, len(scores))
         if k == 0:
@@ -332,7 +404,7 @@ class HybridRetriever:
         for idx in top_indices:
             if scores[idx] <= 0:
                 continue
-            chunk = self.chunks[idx]
+            chunk = snapshot[idx]
             results.append({
                 "chunk_id": chunk["chunk_id"],
                 "text": chunk["text"],
@@ -367,46 +439,16 @@ class HybridRetriever:
         ranked = sorted(fused.values(), key=lambda x: x["rrf_score"], reverse=True)
         return ranked[:final_top_k]
 
-    def score_candidates(self, query: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Hitung rerank_score untuk SEMUA kandidat."""
-        if not candidates:
-            return []
-        pairs = [[query, item["text"]] for item in candidates]
-        with _timed("rerank"):
-            scores = self.reranker.predict(pairs)
-        for item, score in zip(candidates, scores):
-            item["rerank_score"] = float(score)
-        return candidates
-
-    def select_final(self, scored_candidates: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
-        """Ambil top_k kandidat berdasarkan relevansi (rerank_score) saja.
-
-        CATATAN: versi sebelumnya sempat memberi prioritas mutlak ke
-        sumber (koreksi instruktur > dokumen > pengetahuan dasar) di
-        atas relevansi. Itu dicabut lagi -- di praktiknya malah bikin
-        jawaban makin berantakan/salah, karena 1 chunk koreksi yang
-        cuma kebetulan berbagi kata dengan pertanyaan lain (via BM25)
-        bisa menyalip chunk yang jauh lebih relevan hanya bermodal
-        tier, walau topiknya sama sekali beda. Sekarang urutannya balik
-        ke cara biasa/awal: murni berdasarkan rerank_score, seperti
-        chunk lainnya -- kalau instruktur menulis koreksi yang memang
-        relevan dengan suatu pertanyaan, dia akan menang secara alami
-        lewat relevansi, bukan lewat perlakuan khusus."""
-        ranked = sorted(scored_candidates, key=lambda c: c.get("rerank_score", 0.0), reverse=True)
-        return ranked[:top_k]
-
     def retrieve(self, query: str) -> list[dict[str, Any]]:
         with _timed("semantic_search"):
             semantic_results = self.semantic_search(query)
         with _timed("bm25_search"):
             bm25_results = self.bm25_search(query)
         with _timed("rrf_fusion"):
-            fused = self.rrf_fusion(semantic_results, bm25_results, self.config.rrf_k, self.config.final_top_k)
-        # NOTE: timing "rerank" sudah dicatat di dalam score_candidates() itu sendiri --
-        # sebelumnya di-wrap _timed("rerank") lagi di sini, jadi ke-log dobel dengan
-        # angka identik (bukan rerank jalan 2x, cuma logging-nya yang dobel).
-        scored = self.score_candidates(query, [dict(item) for item in fused])
-        return self.select_final(scored, self.config.top_k_rerank)
+            return self.rrf_fusion(
+                semantic_results, bm25_results, self.config.rrf_k, self.config.final_top_k
+            )
+
 
 def load_chunks(json_path: str) -> list[dict[str, Any]]:
     import json
@@ -428,31 +470,6 @@ def load_embedding_model(model_name: str) -> SentenceTransformer:
     return SentenceTransformer(model_name, device=device)
 
 
-def load_reranker(model_name: str) -> CrossEncoder:
-    # BUG YANG DIPERBAIKI: sebelumnya `device` dihitung tapi tidak pernah
-    # diteruskan ke CrossEncoder(...) -- jadi murni dead code, device
-    # sebenarnya ditentukan sendiri oleh default internal sentence-
-    # transformers. Log-nya juga salah bilang "backend=onnx": itu sisa
-    # eksperimen ONNX/OpenVINO (lihat blok yang dikomentari di bawah) yang
-    # sudah ditinggalkan karena bug di library export-nya -- backend yang
-    # betulan dipakai sekarang adalah torch biasa (default CrossEncoder).
-    device = _select_device()
-    logger.info("Loading reranker %s (backend=torch, device=%s)", model_name, device)
-    return CrossEncoder(model_name, max_length=512, device=device)
-
-# Percobaan mempercepat reranker lewat ONNX/OpenVINO -- DITINGGALKAN karena
-# proses export OpenVINO kena bug library yang belum ada perbaikannya.
-# Solusi kecepatan yang dipakai sebagai gantinya: ganti model ke varian
-# lebih ringan (BAAI/bge-reranker-base, lihat RetrievalConfig di atas).
-# def load_reranker(model_name: str) -> CrossEncoder:
-#     reranker_path = "./data/reranker_base_onnx"
-#     device = _select_device()
-#     logger.info("Loading reranker %s (backend=onnx, device=%s)", reranker_path,)
-#     return CrossEncoder(reranker_path, backend="onnx", max_length=512, model_kwargs={
-#             "provider": "CPUExecutionProvider",},
-#     )
-
-
 def initialize_qdrant_client(db_path: str) -> QdrantClient:
     return QdrantClient(path=db_path)
 
@@ -462,14 +479,22 @@ def initialize_qdrant_client(db_path: str) -> QdrantClient:
 # =====================================================================
 
 class KnowledgeBaseManager:
-    """Menyuntikkan chunk baru (koreksi instruktur ATAU dokumen PDF baru)
-    ke KB & index Qdrant/BM25 yang sedang berjalan, tanpa re-ingestion
-    penuh -- dipanggil live dari endpoint instruktur di FastAPI."""
+    """Menyuntikkan / mencabut chunk (koreksi instruktur ATAU dokumen PDF
+    unggahan) pada KB & index Qdrant/BM25 yang sedang berjalan, tanpa
+    re-ingestion penuh -- dipanggil live dari endpoint instruktur.
+
+    Semua operasi tulis diserialkan dengan satu lock, dan operasi massal
+    (unggah PDF, hapus dokumen) bekerja secara BATCH: embedding sekaligus,
+    satu kali tulis Qdrant, satu kali simpan JSON, satu kali rebuild BM25."""
+
+    MAX_BACKUPS = 20
+    UPSERT_BATCH = 64
 
     def __init__(self, retriever: HybridRetriever, kb_json_path: str, backup_dir: str):
         self.retriever = retriever
         self.kb_json_path = kb_json_path
         self.backup_dir = backup_dir
+        self._lock = threading.RLock()
 
     @staticmethod
     def _deterministic_chunk_id(prefix: str, seed_text: str) -> str:
@@ -484,10 +509,19 @@ class KnowledgeBaseManager:
         if not os.path.exists(self.kb_json_path):
             return
         os.makedirs(self.backup_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         backup_path = os.path.join(self.backup_dir, f"kb_snapshot_{timestamp}.json")
         shutil.copy2(self.kb_json_path, backup_path)
         logger.info("Snapshot KB disimpan: %s", backup_path)
+        # Batasi jumlah snapshot supaya folder tidak membengkak.
+        snapshots = sorted(
+            f for f in os.listdir(self.backup_dir) if f.startswith("kb_snapshot_") and f.endswith(".json")
+        )
+        for old in snapshots[: -self.MAX_BACKUPS]:
+            try:
+                os.remove(os.path.join(self.backup_dir, old))
+            except OSError:
+                logger.warning("Gagal menghapus snapshot lama: %s", old)
 
     def _save_kb_json_atomic(self) -> None:
         tmp_path = self.kb_json_path + ".tmp"
@@ -495,132 +529,235 @@ class KnowledgeBaseManager:
             json.dump(self.retriever.chunks, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, self.kb_json_path)
 
-    def _upsert_chunk(self, chunk: dict[str, Any], collection_name: str) -> None:
-        """Tambahkan 1 chunk ke KB in-memory + Qdrant + KB JSON, lalu
-        rebuild BM25 (wajib supaya BM25 tidak buta terhadap chunk baru)."""
-        point_id = self._point_id_for(chunk["chunk_id"])
-        vector = self.retriever.embedding_model.encode(chunk["text"], normalize_embeddings=True).tolist()
-        self.retriever.qdrant_client.upsert(
-            collection_name=collection_name,
-            points=[PointStruct(id=point_id, vector=vector, payload=chunk)],
+    def _upsert_chunks(self, chunks: list[dict[str, Any]], collection_name: str) -> None:
+        """Tambahkan BANYAK chunk sekaligus ke Qdrant + KB in-memory + KB
+        JSON, lalu rebuild BM25 SATU kali (wajib supaya BM25 tidak buta
+        terhadap chunk baru). Kalau penyimpanan JSON/BM25 gagal setelah
+        Qdrant terlanjur ditulis, perubahan dibatalkan supaya ketiga
+        penyimpanan tidak saling berbeda."""
+        if not chunks:
+            return
+        vectors = self.retriever.embedding_model.encode(
+            [c["text"] for c in chunks], normalize_embeddings=True, batch_size=16
         )
-        self.retriever.chunks.append(chunk)
-        self._save_kb_json_atomic()
-        self.retriever.rebuild_bm25()
+        points = [
+            PointStruct(id=self._point_id_for(c["chunk_id"]), vector=vec.tolist(), payload=c)
+            for c, vec in zip(chunks, vectors)
+        ]
+        client = self.retriever.qdrant_client
+        for i in range(0, len(points), self.UPSERT_BATCH):
+            client.upsert(collection_name=collection_name, points=points[i : i + self.UPSERT_BATCH])
+
+        previous_len = len(self.retriever.chunks)
+        try:
+            self.retriever.chunks.extend(chunks)
+            self._save_kb_json_atomic()
+            self.retriever.rebuild_bm25()
+        except Exception:
+            del self.retriever.chunks[previous_len:]
+            client.delete(
+                collection_name=collection_name,
+                points_selector=PointIdsList(points=[p.id for p in points]),
+            )
+            raise
 
     def inject_correction(
-        self, question: str, correction_text: str, corrected_by: str, collection_name: str,
+        self, interaction_id: str, question: str, correction_text: str, corrected_by: str, collection_name: str,
     ) -> str:
-        """Injeksi 1 koreksi instruktur. Chunk gabungan pertanyaan+jawaban
-        (supaya konteksnya tidak hilang, mis. kalau correction_text cuma
-        'ya, lainnya'). chunk_id deterministik dari isi -- retry/klik
-        ganda tidak akan menghasilkan duplikat."""
+        """Injeksi 1 koreksi instruktur sebagai chunk BARU (bukan mengedit
+        chunk lama). Teks chunk = pertanyaan + koreksi (supaya konteksnya
+        tidak hilang, mis. kalau correction_text cuma 'ya, lainnya').
+
+        chunk_id = CORR_ + SHA-1(interaction_id + teks koreksi)[:10] --
+        sama dengan rancangan pipeline evaluasi (qa_id diganti
+        interaction_id). Deterministik, jadi klik ganda/retry tidak
+        menghasilkan duplikat; dan karena interaction_id ikut di-hash,
+        dua interaksi dengan pertanyaan & koreksi yang sama tidak berbagi
+        satu chunk (menghapus koreksi yang satu tidak merusak yang lain)."""
         combined_text = f"Permasalahan: {question.strip()}\nSolusi: {correction_text.strip()}"
-        chunk_id = self._deterministic_chunk_id("CORR", combined_text)
+        chunk_id = self._deterministic_chunk_id("CORR", f"{interaction_id}\n{correction_text.strip()}")
 
-        existing_ids = {c["chunk_id"] for c in self.retriever.chunks}
-        if chunk_id in existing_ids:
-            logger.info("SKIP -- koreksi ini sudah pernah diinjeksi (chunk_id=%s).", chunk_id)
+        with self._lock:
+            existing_ids = {c["chunk_id"] for c in self.retriever.chunks}
+            if chunk_id in existing_ids:
+                logger.info("SKIP -- koreksi ini sudah pernah diinjeksi (chunk_id=%s).", chunk_id)
+                return chunk_id
+
+            self._backup_kb_json()
+            chunk = {
+                "chunk_id": chunk_id,
+                "text": combined_text,
+                "document_id": "koreksi_instruktur",
+                "source": "human_correction",
+                "type": "correction",
+                "content_category": "koreksi_instruktur",
+                "page_start": None,
+                "page_end": None,
+                "bab": None,
+                "subbab": None,
+                "section_path": "Koreksi Manual Instruktur",
+                "token_count": len(combined_text.split()),
+                "char_count": len(combined_text),
+                "created_at": utc_now_iso(),
+                "corrected_by": corrected_by,
+                "correction_date": wib_today(),
+                "based_on_interaction_id": interaction_id,
+            }
+            self._upsert_chunks([chunk], collection_name)
+            logger.info("INJECTED koreksi -> chunk_id=%s", chunk_id)
             return chunk_id
-
-        self._backup_kb_json()
-        chunk = {
-            "chunk_id": chunk_id,
-            "text": combined_text,
-            "document_id": "koreksi_instruktur",
-            "source": "human_correction",
-            "type": "correction",
-            "content_category": "koreksi_instruktur",
-            "page_start": None,
-            "page_end": None,
-            "bab": None,
-            "subbab": None,
-            "section_path": "Koreksi Manual Instruktur",
-            "token_count": len(combined_text.split()),
-            "char_count": len(combined_text),
-            "created_at": datetime.now().isoformat(),
-            "corrected_by": corrected_by,
-            "correction_date": datetime.now().strftime("%Y-%m-%d"),
-        }
-        self._upsert_chunk(chunk, collection_name)
-        logger.info("INJECTED koreksi -> chunk_id=%s", chunk_id)
-        return chunk_id
 
     def inject_pdf(
         self, document_id: str, pages: list[str], collection_name: str,
         document_year: Optional[int] = None, chunk_size: int = 800, overlap: int = 100,
     ) -> list[str]:
         """Injeksi dokumen PDF baru: tiap halaman dipecah jadi beberapa
-        chunk (chunk_size karakter, overlap antar-chunk supaya konteks
-        di batas potongan tidak hilang). `document_year` disimpan
-        sebagai metadata (ikut ditampilkan di label sumber lewat
-        format_source_label), TIDAK dipakai untuk mengatur urutan
-        retrieval -- urutan hasil retrieval murni berdasarkan relevansi
-        (rerank_score), sama seperti chunk lainnya. Return list
+        chunk (chunk_size karakter, overlap antar-chunk supaya konteks di
+        batas potongan tidak hilang). `document_year` disimpan sebagai
+        metadata (ikut ditampilkan di label sumber dan dipakai LLM untuk
+        memilih informasi terbaru bila konteks bertentangan). Return list
         chunk_id yang berhasil ditambahkan (chunk kosong/duplikat
-        dilewati)."""
-        self._backup_kb_json()
-        existing_ids = {c["chunk_id"] for c in self.retriever.chunks}
-        injected_ids: list[str] = []
+        dilewati). Seluruh chunk ditulis dalam SATU operasi batch."""
+        with self._lock:
+            existing_ids = {c["chunk_id"] for c in self.retriever.chunks}
+            new_chunks: list[dict[str, Any]] = []
+            created_at = utc_now_iso()
 
-        for page_num, page_text in enumerate(pages, start=1):
-            page_text = page_text.strip()
-            if not page_text:
-                continue
-            start = 0
-            while start < len(page_text):
-                piece = page_text[start : start + chunk_size].strip()
-                if piece:
-                    chunk_id = self._deterministic_chunk_id("PDF", f"{document_id}::{page_num}::{piece[:50]}::{start}")
-                    if chunk_id not in existing_ids:
-                        chunk = {
-                            "chunk_id": chunk_id,
-                            "text": piece,
-                            "document_id": document_id,
-                            "document_year": document_year,
-                            "source": "uploaded_pdf",
-                            "type": "document",
-                            "content_category": "dokumen_unggahan",
-                            "page_start": page_num,
-                            "page_end": page_num,
-                            "bab": None,
-                            "subbab": None,
-                            "section_path": document_id,
-                            "token_count": len(piece.split()),
-                            "char_count": len(piece),
-                            "created_at": datetime.now().isoformat(),
-                        }
-                        self._upsert_chunk(chunk, collection_name)
-                        existing_ids.add(chunk_id)
-                        injected_ids.append(chunk_id)
-                start += chunk_size - overlap
+            for page_num, page_text in enumerate(pages, start=1):
+                page_text = page_text.strip()
+                if not page_text:
+                    continue
+                start = 0
+                while start < len(page_text):
+                    piece = page_text[start : start + chunk_size].strip()
+                    if piece:
+                        chunk_id = self._deterministic_chunk_id(
+                            "PDF", f"{document_id}::{page_num}::{piece[:50]}::{start}"
+                        )
+                        if chunk_id not in existing_ids:
+                            new_chunks.append({
+                                "chunk_id": chunk_id,
+                                "text": piece,
+                                "document_id": document_id,
+                                "document_year": document_year,
+                                "source": "uploaded_pdf",
+                                "type": "document",
+                                "content_category": "dokumen_unggahan",
+                                "page_start": page_num,
+                                "page_end": page_num,
+                                "bab": None,
+                                "subbab": None,
+                                "section_path": document_id,
+                                "token_count": len(piece.split()),
+                                "char_count": len(piece),
+                                "created_at": created_at,
+                            })
+                            existing_ids.add(chunk_id)
+                    start += chunk_size - overlap
 
-        logger.info("PDF '%s' (edisi %s) diinjeksi: %d chunk baru.", document_id, document_year, len(injected_ids))
-        return injected_ids
+            if new_chunks:
+                self._backup_kb_json()
+                self._upsert_chunks(new_chunks, collection_name)
+
+            logger.info("PDF '%s' (edisi %s) diinjeksi: %d chunk baru.", document_id, document_year, len(new_chunks))
+            return [c["chunk_id"] for c in new_chunks]
+
+    def delete_chunks(self, chunk_ids: list[str], collection_name: str) -> int:
+        """Cabut BANYAK chunk sekaligus dari KB in-memory + KB JSON +
+        Qdrant, lalu rebuild BM25 satu kali. Return jumlah chunk yang
+        benar-benar dicabut (chunk_id yang sudah tidak ada dilewati)."""
+        target = set(chunk_ids)
+        with self._lock:
+            removed_ids = [c["chunk_id"] for c in self.retriever.chunks if c["chunk_id"] in target]
+            if not removed_ids:
+                logger.info("SKIP hapus -- tidak ada chunk yang cocok di KB.")
+                return 0
+
+            self._backup_kb_json()
+            self.retriever.chunks[:] = [c for c in self.retriever.chunks if c["chunk_id"] not in target]
+            self._save_kb_json_atomic()
+            self.retriever.rebuild_bm25()
+
+            point_ids = [self._point_id_for(cid) for cid in removed_ids]
+            for i in range(0, len(point_ids), self.UPSERT_BATCH):
+                self.retriever.qdrant_client.delete(
+                    collection_name=collection_name,
+                    points_selector=PointIdsList(points=point_ids[i : i + self.UPSERT_BATCH]),
+                )
+            logger.info("DELETED %d chunk dari KB.", len(removed_ids))
+            return len(removed_ids)
 
     def delete_chunk(self, chunk_id: str, collection_name: str) -> bool:
-        """Cabut 1 chunk dari KB in-memory + kb JSON + Qdrant, lalu rebuild
-        BM25. Dipakai saat instruktur mencabut sebuah koreksi yang ternyata
-        SALAH dari daftar log koreksi (lihat endpoint DELETE
-        /instructor/corrections/{correction_id}). Return False kalau
-        chunk_id sudah tidak ada di KB (mis. sudah pernah dihapus)."""
-        idx = next((i for i, c in enumerate(self.retriever.chunks) if c["chunk_id"] == chunk_id), None)
-        if idx is None:
-            logger.info("SKIP hapus -- chunk_id=%s sudah tidak ada di KB.", chunk_id)
-            return False
+        """Cabut 1 chunk (dipakai saat koreksi dihapus/diedit). Return False
+        kalau chunk_id sudah tidak ada di KB."""
+        return self.delete_chunks([chunk_id], collection_name) > 0
 
-        self._backup_kb_json()
-        self.retriever.chunks.pop(idx)
-        self._save_kb_json_atomic()
-        self.retriever.rebuild_bm25()
+    # -----------------------------------------------------------------
+    # Pengelolaan dokumen untuk tab "Kelola KB"
+    # -----------------------------------------------------------------
 
-        point_id = self._point_id_for(chunk_id)
-        self.retriever.qdrant_client.delete(
-            collection_name=collection_name,
-            points_selector=PointIdsList(points=[point_id]),
-        )
-        logger.info("DELETED chunk -> chunk_id=%s", chunk_id)
-        return True
+    @staticmethod
+    def _kind_of(chunk: dict[str, Any]) -> str:
+        source = chunk.get("source")
+        if source == "human_correction":
+            return "correction"
+        if source == "uploaded_pdf":
+            return "upload"
+        return "base"
+
+    def list_documents(self) -> list[dict[str, Any]]:
+        """Ringkasan isi KB per dokumen. kind: 'base' (KB awal, terkunci),
+        'upload' (PDF unggahan instruktur, boleh dihapus), 'correction'
+        (seluruh chunk koreksi, dikelola dari tab Tinjau Percakapan)."""
+        with self._lock:
+            snapshot = list(self.retriever.chunks)
+
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
+        for chunk in snapshot:
+            kind = self._kind_of(chunk)
+            raw_id = chunk.get("document_id") or chunk.get("source") or "-"
+            key = (kind, "koreksi_instruktur" if kind == "correction" else str(raw_id))
+            entry = groups.get(key)
+            if entry is None:
+                if kind == "correction":
+                    display_name = "Koreksi instruktur"
+                else:
+                    display_name = (resolve_document_display_name(chunk) if kind == "base" else None) or str(raw_id)
+                entry = groups[key] = {
+                    "document_id": key[1],
+                    "display_name": display_name,
+                    "kind": kind,
+                    "document_year": chunk.get("document_year"),
+                    "chunk_count": 0,
+                    "created_at": chunk.get("created_at"),
+                    "deletable": kind == "upload",
+                }
+            entry["chunk_count"] += 1
+            created = chunk.get("created_at")
+            if created and (not entry["created_at"] or created < entry["created_at"]):
+                entry["created_at"] = created
+
+        order = {"base": 0, "upload": 1, "correction": 2}
+        return sorted(groups.values(), key=lambda e: (order[e["kind"]], e["display_name"].lower()))
+
+    def is_base_document_id(self, document_id: str) -> bool:
+        wanted = document_id.strip().lower()
+        with self._lock:
+            return any(
+                self._kind_of(c) == "base" and str(c.get("document_id") or "").strip().lower() == wanted
+                for c in self.retriever.chunks
+            )
+
+    def delete_document(self, document_id: str, collection_name: str) -> int:
+        """Hapus SEMUA chunk dari satu dokumen UNGGAHAN. KB awal dan chunk
+        koreksi tidak pernah ikut terhapus lewat jalur ini. Return jumlah
+        chunk yang dicabut (0 = dokumen unggahan tsb tidak ditemukan)."""
+        with self._lock:
+            ids = [
+                c["chunk_id"] for c in self.retriever.chunks
+                if self._kind_of(c) == "upload" and c.get("document_id") == document_id
+            ]
+            return self.delete_chunks(ids, collection_name) if ids else 0
 
 
 def extract_pdf_pages(file_bytes: bytes) -> list[str]:
@@ -639,7 +776,15 @@ def extract_pdf_pages(file_bytes: bytes) -> list[str]:
 class ConversationStore:
     """Penyimpanan percakapan berbasis SQLite -- perlu persisten &
     dibagi lintas sesi/user, supaya instruktur bisa meninjau pertanyaan
-    yang diajukan SEMUA user dari endpoint terpisah."""
+    yang diajukan SEMUA user dari endpoint terpisah.
+
+    Semua timestamp disimpan dalam UTC dengan penanda zona waktu
+    (`+00:00`), supaya browser menampilkannya benar di zona waktu mana
+    pun. Penghapusan room oleh petugas bersifat SOFT DELETE: room
+    disembunyikan dari petugas, tetapi interaksi & koreksinya tetap ada
+    sehingga instruktur masih bisa meninjau dan mengelolanya."""
+
+    DEFAULT_ROOM_TITLE = "Percakapan Baru"
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -679,10 +824,6 @@ class ConversationStore:
                     chunk_id TEXT
                 )
             """)
-            # ROOM PERCAKAPAN -- satu user bisa punya banyak room (mirip
-            # ChatGPT/Claude), tiap room adalah satu utas tanya-jawab
-            # terpisah. Lihat blok method create_room/list_rooms/dst di
-            # bawah untuk detail lengkapnya.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS chat_rooms (
                     id TEXT PRIMARY KEY,
@@ -695,16 +836,13 @@ class ConversationStore:
             self._ensure_column(conn, "interactions", "sources_json", "TEXT")
             self._ensure_column(conn, "interactions", "room_id", "TEXT")
             # verified = instruktur menandai jawaban chatbot SUDAH BENAR
-            # apa adanya, TANPA menulis koreksi & TANPA injeksi chunk baru
-            # ke KB -- beda dari 'corrected' (lihat mark_verified()).
+            # apa adanya, TANPA koreksi & TANPA injeksi chunk baru ke KB.
             self._ensure_column(conn, "interactions", "verified", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "interactions", "verified_by", "TEXT")
             self._ensure_column(conn, "interactions", "verified_at", "TEXT")
-            # timestamp presisi (bukan cuma tanggal) -- dipakai untuk
-            # mengurutkan log koreksi (list_corrections) secara akurat.
-            # Baris lama (sebelum kolom ini ada) akan NULL, jadi
-            # list_corrections tetap fallback ke rowid untuk baris itu.
             self._ensure_column(conn, "corrections", "correction_at", "TEXT")
+            # soft delete room (diisi saat petugas menghapus percakapan).
+            self._ensure_column(conn, "chat_rooms", "deleted_at", "TEXT")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
@@ -712,15 +850,22 @@ class ConversationStore:
         if column not in existing_cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
+    @staticmethod
+    def derive_status(corrected: Any, verified: Any) -> str:
+        """Status verifikasi tunggal untuk UI: corrected > verified > unverified."""
+        if corrected:
+            return "corrected"
+        if verified:
+            return "verified"
+        return "unverified"
+
     # -----------------------------------------------------------------
     # ROOM PERCAKAPAN
     # -----------------------------------------------------------------
 
-    DEFAULT_ROOM_TITLE = "Percakapan Baru"
-
     def create_room(self, username: str, title: Optional[str] = None) -> dict[str, Any]:
         room_id = str(uuid.uuid4())
-        now = datetime.now().isoformat()
+        now = utc_now_iso()
         final_title = title or self.DEFAULT_ROOM_TITLE
         with self._connect() as conn:
             conn.execute(
@@ -730,18 +875,14 @@ class ConversationStore:
         return {"id": room_id, "title": final_title, "created_at": now, "updated_at": now}
 
     def list_rooms(self, username: str) -> list[dict[str, Any]]:
-        """Daftar room milik satu user, yang paling baru dipakai duluan.
-
-        Migrasi sekali-jalan: baris `interactions` lama dari sebelum
-        fitur room ini ada punya `room_id` NULL -- baris seperti itu
-        dikumpulkan otomatis ke satu room "Percakapan Lama" supaya
-        histori lama tidak hilang begitu fitur ini diaktifkan."""
+        """Daftar room (yang belum dihapus) milik satu user, paling baru
+        dipakai duluan. Baris `interactions` lama dengan `room_id` NULL
+        dikumpulkan otomatis ke satu room "Percakapan Lama"."""
         with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
             orphan_count = conn.execute(
-                "SELECT COUNT(*) AS n FROM interactions WHERE username = ? AND room_id IS NULL",
+                "SELECT COUNT(*) FROM interactions WHERE username = ? AND room_id IS NULL",
                 (username,),
-            ).fetchone()["n"]
+            ).fetchone()[0]
 
         if orphan_count:
             legacy_room = self.create_room(username, title="Percakapan Lama")
@@ -754,23 +895,16 @@ class ConversationStore:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT id, title, created_at, updated_at FROM chat_rooms WHERE username = ? ORDER BY updated_at DESC",
+                "SELECT id, title, created_at, updated_at FROM chat_rooms "
+                "WHERE username = ? AND deleted_at IS NULL ORDER BY updated_at DESC",
                 (username,),
             ).fetchall()
         return [dict(row) for row in rows]
 
     def get_or_create_active_room(self, username: str) -> dict[str, Any]:
-        """Kembalikan SATU room kosong (belum pernah ada pesan) milik
-        user kalau ada, atau buat room baru kalau belum ada sama
-        sekali. Inilah yang mencegah "Percakapan Baru" kosong menumpuk
-        tiap kali user login ulang atau menekan tombol "Percakapan
-        Baru" tanpa pernah benar-benar mengirim pesan -- persis
-        seperti ChatGPT/Claude: room baru yang tidak dipakai tidak
-        pernah benar-benar tersimpan sebagai thread terpisah.
-
-        Dipanggil dari endpoint POST /rooms (lihat api/v1/chat.py) --
-        baik saat login baru maupun saat tombol "Percakapan Baru"
-        diklik, keduanya lewat jalur yang sama ini."""
+        """Kembalikan SATU room kosong (belum ada pesan) milik user kalau
+        ada, atau buat room baru. Mencegah "Percakapan Baru" kosong
+        menumpuk tiap kali login ulang / menekan tombol Percakapan Baru."""
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             empty_rooms = conn.execute(
@@ -778,6 +912,7 @@ class ConversationStore:
                 SELECT r.id, r.title, r.created_at, r.updated_at
                 FROM chat_rooms r
                 WHERE r.username = ?
+                  AND r.deleted_at IS NULL
                   AND NOT EXISTS (SELECT 1 FROM interactions i WHERE i.room_id = r.id)
                 ORDER BY r.updated_at DESC
                 """,
@@ -786,9 +921,6 @@ class ConversationStore:
 
         if empty_rooms:
             keeper = dict(empty_rooms[0])
-            # Beres-beres: kalau ternyata ada LEBIH DARI SATU room kosong
-            # (peninggalan dari sebelum logic ini ada), sisakan cuma
-            # yang paling baru -- baru dipakai user, sisanya dibuang.
             if len(empty_rooms) > 1:
                 stale_ids = [(row["id"],) for row in empty_rooms[1:]]
                 with self._connect() as conn:
@@ -798,40 +930,34 @@ class ConversationStore:
         return self.create_room(username)
 
     def get_room(self, room_id: str, username: str) -> Optional[dict[str, Any]]:
-        """Ambil 1 room MILIK `username` tsb -- dipakai sebagai
-        pengecekan kepemilikan sebelum /ask, /history, atau delete_room
-        memproses sebuah room_id dari request user."""
+        """Ambil 1 room MILIK `username` yang belum dihapus -- dipakai
+        sebagai pengecekan kepemilikan sebelum /ask, /history, atau
+        delete_room memproses sebuah room_id."""
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT id, title, created_at, updated_at FROM chat_rooms WHERE id = ? AND username = ?",
+                "SELECT id, title, created_at, updated_at FROM chat_rooms "
+                "WHERE id = ? AND username = ? AND deleted_at IS NULL",
                 (room_id, username),
             ).fetchone()
         return dict(row) if row else None
 
     def delete_room(self, room_id: str, username: str) -> bool:
-        """Hapus room beserta seluruh interaksi & koreksi di dalamnya.
-        Mengembalikan False (tanpa menghapus apa pun) kalau room tidak
-        ditemukan atau bukan milik `username` -- supaya user tidak bisa
-        menghapus room milik user lain lewat endpoint ini."""
+        """SOFT DELETE: room disembunyikan dari petugas, tetapi interaksi
+        dan koreksinya TETAP tersimpan agar instruktur masih bisa
+        meninjaunya dan mengelola koreksi yang sudah masuk ke Knowledge
+        Base. False kalau room tidak ditemukan / bukan milik `username`."""
         if not self.get_room(room_id, username):
             return False
         with self._connect() as conn:
-            conn.execute(
-                "DELETE FROM corrections WHERE interaction_id IN (SELECT id FROM interactions WHERE room_id = ?)",
-                (room_id,),
-            )
-            conn.execute("DELETE FROM interactions WHERE room_id = ?", (room_id,))
-            conn.execute("DELETE FROM chat_rooms WHERE id = ?", (room_id,))
+            conn.execute("UPDATE chat_rooms SET deleted_at = ? WHERE id = ?", (utc_now_iso(), room_id))
         return True
 
     def _touch_room(self, conn: sqlite3.Connection, room_id: str, first_question: Optional[str] = None) -> None:
-        """Update updated_at room setiap ada pesan baru (supaya urutan
-        di sidebar mengikuti yang paling baru DIPAKAI, bukan cuma
-        dibuat). Kalau room masih berjudul default, judulnya diganti
-        otomatis dari pertanyaan pertama -- mirip auto-title ChatGPT --
-        supaya sidebar tidak penuh "Percakapan Baru"."""
-        now = datetime.now().isoformat()
+        """Update updated_at room setiap ada pesan baru. Kalau room masih
+        berjudul default, judulnya diganti otomatis dari pertanyaan
+        pertama."""
+        now = utc_now_iso()
         row = conn.execute("SELECT title FROM chat_rooms WHERE id = ?", (room_id,)).fetchone()
         current_title = row[0] if row else None
         if first_question and current_title == self.DEFAULT_ROOM_TITLE:
@@ -839,6 +965,10 @@ class ConversationStore:
             conn.execute("UPDATE chat_rooms SET title = ?, updated_at = ? WHERE id = ?", (short_title, now, room_id))
         else:
             conn.execute("UPDATE chat_rooms SET updated_at = ? WHERE id = ?", (now, room_id))
+
+    # -----------------------------------------------------------------
+    # INTERAKSI
+    # -----------------------------------------------------------------
 
     def log_interaction(
         self, username: str, room_id: str, question: str, answer: str, context: str, is_abstained: bool,
@@ -850,29 +980,65 @@ class ConversationStore:
             conn.execute(
                 "INSERT INTO interactions (id, timestamp, username, question, answer, context, is_abstained, corrected, sources_json, room_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-                (interaction_id, datetime.now().isoformat(), username, question, answer, context, int(is_abstained), sources_json, room_id),
+                (interaction_id, utc_now_iso(), username, question, answer, context, int(is_abstained), sources_json, room_id),
             )
             self._touch_room(conn, room_id, first_question=question)
         return interaction_id
 
-    def list_interactions(self, only_uncorrected: bool = False) -> list[dict[str, Any]]:
-        """`only_uncorrected=True` berarti "belum ditindak sama sekali"
-        -- yaitu belum dikoreksi MAUPUN belum diverifikasi, supaya
-        interaksi yang sudah ditandai selesai lewat jalur mana pun
-        hilang dari antrean instruktur."""
-        query = "SELECT id, timestamp, username, question, answer, is_abstained, corrected, verified FROM interactions"
-        if only_uncorrected:
-            query += " WHERE corrected = 0 AND verified = 0"
-        query += " ORDER BY timestamp DESC"
+    def get_interaction(self, interaction_id: str) -> Optional[dict[str, Any]]:
+        """Ambil 1 interaksi (pertanyaan, jawaban, status) -- dipakai
+        endpoint instruktur untuk validasi & mengambil pertanyaan ASLI
+        dari database (bukan dari kiriman klien)."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT id, question, answer, corrected, verified FROM interactions WHERE id = ?",
+                (interaction_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["status"] = self.derive_status(item["corrected"], item["verified"])
+        return item
+
+    def list_interactions(self, status: str = "all") -> list[dict[str, Any]]:
+        """Seluruh interaksi (semua user, termasuk room yang sudah
+        dihapus petugas) untuk tab Tinjau Percakapan, sudah menyertakan
+        data koreksinya bila ada. `status`: all | unverified | verified |
+        corrected."""
+        query = """
+            SELECT i.id, i.timestamp, i.username, i.question, i.answer, i.is_abstained,
+                   i.corrected, i.verified, i.verified_by, i.verified_at,
+                   c.id AS correction_id, c.correction_text, c.corrected_by,
+                   c.correction_date, c.correction_at
+            FROM interactions i
+            LEFT JOIN corrections c ON c.interaction_id = i.id
+        """
+        where = {
+            "unverified": " WHERE COALESCE(i.corrected, 0) = 0 AND COALESCE(i.verified, 0) = 0",
+            "verified": " WHERE COALESCE(i.corrected, 0) = 0 AND COALESCE(i.verified, 0) = 1",
+            "corrected": " WHERE COALESCE(i.corrected, 0) = 1",
+        }.get(status, "")
+        query += where + " ORDER BY i.timestamp DESC"
+
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(query).fetchall()
-        return [{**dict(row), "verified": bool(row["verified"])} for row in rows]
+
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["is_abstained"] = bool(item["is_abstained"])
+            item["status"] = self.derive_status(item["corrected"], item["verified"])
+            item["corrected"] = bool(item["corrected"])
+            item["verified"] = bool(item["verified"])
+            results.append(item)
+        return results
 
     def list_interactions_for_room(self, room_id: str, username: str) -> list[dict[str, Any]]:
-        """Riwayat percakapan MILIK SATU ROOM (dan dipastikan juga milik
-        `username` yang sama), urut kronologis (lama -> baru), sudah
-        menyertakan correction_text & daftar sumber kalau ada."""
+        """Riwayat percakapan MILIK SATU ROOM (dan dipastikan milik
+        `username`), urut kronologis (lama -> baru), sudah menyertakan
+        correction_text & daftar sumber kalau ada."""
         query = """
             SELECT i.id, i.timestamp, i.username, i.question, i.answer, i.context,
                    i.is_abstained, i.corrected, i.verified, i.verified_by, i.verified_at,
@@ -890,52 +1056,38 @@ class ConversationStore:
         results = []
         for row in rows:
             item = dict(row)
+            item["is_abstained"] = bool(item["is_abstained"])
+            item["status"] = self.derive_status(item["corrected"], item["verified"])
+            item["corrected"] = bool(item["corrected"])
             item["verified"] = bool(item["verified"])
             try:
                 item["sources"] = json.loads(item.pop("sources_json") or "[]")
             except (json.JSONDecodeError, TypeError):
-                item["sources"] = []  # baris lama dari sebelum kolom ini ada
+                item["sources"] = []
             results.append(item)
         return results
 
+    # -----------------------------------------------------------------
+    # KOREKSI & VERIFIKASI
+    # -----------------------------------------------------------------
+
     def mark_corrected(self, interaction_id: str, correction_text: str, corrected_by: str, chunk_id: str) -> None:
-        now = datetime.now()
+        now = utc_now_iso()
         with self._connect() as conn:
-            conn.execute("UPDATE interactions SET corrected = 1 WHERE id = ?", (interaction_id,))
+            conn.execute(
+                "UPDATE interactions SET corrected = 1, verified = 0, verified_by = NULL, verified_at = NULL WHERE id = ?",
+                (interaction_id,),
+            )
             conn.execute(
                 "INSERT INTO corrections "
                 "(id, interaction_id, correction_text, corrected_by, correction_date, chunk_id, correction_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), interaction_id, correction_text, corrected_by,
-                 now.strftime("%Y-%m-%d"), chunk_id, now.isoformat()),
+                (str(uuid.uuid4()), interaction_id, correction_text, corrected_by, wib_today(), chunk_id, now),
             )
-
-    def list_corrections(self) -> list[dict[str, Any]]:
-        """Log seluruh koreksi yang pernah diinjeksi ke KB -- untuk endpoint
-        GET /instructor/corrections, supaya instruktur bisa meninjau (dan
-        kalau perlu mencabut lewat delete_correction()) koreksi yang salah.
-        Diurutkan dari yang PALING BARU diinjeksi. `correction_at` (timestamp
-        presisi) dipakai kalau ada; baris lama sebelum kolom ini ditambahkan
-        akan NULL, jadi fallback ke rowid (urutan insert) supaya tetap
-        terurut benar tanpa mematahkan histori lama."""
-        query = """
-            SELECT c.id AS correction_id, c.interaction_id, c.correction_text,
-                   c.corrected_by, c.correction_date, c.correction_at, c.chunk_id,
-                   i.username, i.question AS original_question
-            FROM corrections c
-            JOIN interactions i ON i.id = c.interaction_id
-            ORDER BY COALESCE(c.correction_at, '') DESC, c.rowid DESC
-        """
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(query).fetchall()
-        return [dict(row) for row in rows]
 
     def get_correction(self, correction_id: str) -> Optional[dict[str, Any]]:
         """Ambil 1 baris koreksi lengkap (termasuk `original_question` &
-        `chunk_id` LAMA) -- dipakai endpoint PATCH /instructor/corrections/{id}
-        sebelum re-injeksi, supaya tahu pertanyaan aslinya dan chunk mana
-        yang harus dicabut setelah versi baru berhasil disuntikkan."""
+        `chunk_id` LAMA) -- dipakai PATCH /instructor/corrections/{id}."""
         query = """
             SELECT c.id AS correction_id, c.interaction_id, c.correction_text,
                    c.corrected_by, c.correction_date, c.correction_at, c.chunk_id,
@@ -950,28 +1102,22 @@ class ConversationStore:
         return dict(row) if row else None
 
     def update_correction(self, correction_id: str, correction_text: str, corrected_by: str, chunk_id: str) -> bool:
-        """Perbarui teks sebuah koreksi yang sudah ada + `chunk_id` (hasil
-        re-injeksi ke KB dengan isi baru) DAN geser correction_date/
-        correction_at ke SEKARANG. Menggeser tanggal ini penting: aturan
-        'ambil informasi paling baru' di build_system_prompt membandingkan
-        tanggal informasi antar-KONTEKS, jadi versi yang baru diedit harus
-        tercatat sebagai yang TERBARU supaya tetap menang dibanding
-        konteks lain yang (mungkin) bertentangan dengannya."""
-        now = datetime.now()
+        """Perbarui teks koreksi + `chunk_id` hasil re-injeksi, dan geser
+        correction_date/correction_at ke SEKARANG supaya aturan 'ambil
+        informasi paling baru' di system prompt menganggap hasil edit ini
+        sebagai versi terbaru."""
         with self._connect() as conn:
             cur = conn.execute(
                 "UPDATE corrections SET correction_text = ?, corrected_by = ?, "
                 "correction_date = ?, correction_at = ?, chunk_id = ? WHERE id = ?",
-                (correction_text, corrected_by, now.strftime("%Y-%m-%d"), now.isoformat(), chunk_id, correction_id),
+                (correction_text, corrected_by, wib_today(), utc_now_iso(), chunk_id, correction_id),
             )
         return cur.rowcount > 0
 
     def delete_correction(self, correction_id: str) -> Optional[str]:
-        """Hapus 1 baris di tabel `corrections` & reset interaksi terkait
-        (corrected=0) supaya interaksi itu kembali muncul di antrean
-        instruktur seperti belum pernah dikoreksi. Return chunk_id yang
-        harus ikut dihapus dari KB/Qdrant (lewat KnowledgeBaseManager.
-        delete_chunk), atau None kalau correction_id tidak ditemukan."""
+        """Hapus 1 baris `corrections` & reset interaksi terkait
+        (corrected=0 -> kembali Unverified). Return chunk_id yang harus
+        ikut dihapus dari KB/Qdrant, atau None kalau tidak ditemukan."""
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
@@ -984,16 +1130,20 @@ class ConversationStore:
         return row["chunk_id"]
 
     def mark_verified(self, interaction_id: str, verified_by: str) -> None:
-        """Tandai jawaban chatbot SUDAH BENAR apa adanya -- TANPA
-        menulis correction_text & TANPA menyuntikkan chunk baru ke KB
-        (karena jawabannya memang sudah tepat, tidak ada yang perlu
-        ditambahkan ke pengetahuan). Ini yang membedakannya dari
-        mark_corrected(): tidak ada baris baru di tabel `corrections`,
-        cuma menandai kolom verified di `interactions`."""
+        """Tandai jawaban chatbot SUDAH BENAR apa adanya (status Verified)
+        -- tanpa correction_text & tanpa chunk baru di KB."""
         with self._connect() as conn:
             conn.execute(
                 "UPDATE interactions SET verified = 1, verified_by = ?, verified_at = ? WHERE id = ?",
-                (verified_by, datetime.now().isoformat(), interaction_id),
+                (verified_by, utc_now_iso(), interaction_id),
+            )
+
+    def mark_unverified(self, interaction_id: str) -> None:
+        """Batalkan verifikasi: interaksi kembali Unverified."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE interactions SET verified = 0, verified_by = NULL, verified_at = NULL WHERE id = ?",
+                (interaction_id,),
             )
 
 
@@ -1027,10 +1177,12 @@ def build_context_block(retrieved_chunks: list[dict[str, Any]]) -> str:
 
 def format_source_label(chunk: dict[str, Any]) -> str:
     """Terjemahkan metadata 1 chunk jadi label sumber yang mudah dibaca
-    user (nama dokumen + halaman, atau info koreksi instruktur).
-    Menangani KEDUA bentuk: chunk hasil retrieve() (field di
-    chunk['metadata']) maupun chunk ringkas dari ConversationStore
-    (field sudah di level atas)."""
+    user. Sumber KB awal ditampilkan dengan NAMA LENGKAP (Buku 4 Pedoman
+    Susenas Maret 2025 / Rangkuman Penegasan Permasalahan 2025); dokumen
+    unggahan instruktur memakai nama dan tahun edisi yang diketik
+    instruktur; koreksi menampilkan nama instruktur dan tanggalnya.
+    Menangani KEDUA bentuk chunk: hasil retrieve() (field di
+    chunk['metadata']) maupun metadata ringkas dari ConversationStore."""
     meta = chunk.get("metadata") or chunk
     source = meta.get("source", "")
 
@@ -1039,14 +1191,19 @@ def format_source_label(chunk: dict[str, Any]) -> str:
         correction_date = meta.get("correction_date", "-")
         return f"🛠️ Koreksi instruktur ({corrected_by}, {correction_date})"
 
-    document_id = meta.get("document_id") or "Dokumen tidak diketahui"
-    document_year = meta.get("document_year")
     page_start = meta.get("page_start")
     page_end = meta.get("page_end")
 
-    label = f"📄 {document_id}"
-    if document_year:
-        label += f" ({document_year})"
+    display_name = resolve_document_display_name(meta)
+    if display_name:
+        label = f"📄 {display_name}"
+    else:
+        document_id = meta.get("document_id") or "Dokumen tidak diketahui"
+        document_year = meta.get("document_year")
+        label = f"📄 {document_id}"
+        if document_year:
+            label += f" ({document_year})"
+
     if page_start and page_end and page_start == page_end:
         label += f" — hal. {page_start}"
     elif page_start and page_end:
@@ -1123,20 +1280,32 @@ Tanpa tambahan apa pun.
 """
 
 
+def _build_prompt(query: str, retrieved_chunks: list[dict[str, Any]]) -> tuple[str, str]:
+    context_block = build_context_block(retrieved_chunks)
+    prompt = f"KONTEKS:\n\n{context_block}\n\n\nPERTANYAAN:\n\n{query}\n\n\nJAWABAN:\n"
+    return prompt, context_block
+
+
+def _build_generate_config(gen_config: GenerationConfig) -> genai_types.GenerateContentConfig:
+    level = getattr(genai_types.ThinkingLevel, gen_config.thinking_level.strip().upper())
+    kwargs: dict[str, Any] = {
+        "system_instruction": build_system_prompt(gen_config),
+        "max_output_tokens": gen_config.max_output_tokens,
+        "thinking_config": genai_types.ThinkingConfig(thinking_level=level),
+    }
+    if gen_config.temperature is not None:
+        kwargs["temperature"] = gen_config.temperature
+    return genai_types.GenerateContentConfig(**kwargs)
+
+
 def generate_answer(
     query: str, retrieved_chunks: list[dict[str, Any]], client: Any, gen_config: GenerationConfig
 ) -> tuple[str, str]:
-    context_block = build_context_block(retrieved_chunks)
-    prompt = f"KONTEKS:\n\n{context_block}\n\n\nPERTANYAAN:\n\n{query}\n\n\nJAWABAN:\n"
+    prompt, context_block = _build_prompt(query, retrieved_chunks)
     response = client.models.generate_content(
         model=gen_config.gemini_model,
         contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=build_system_prompt(gen_config),
-            temperature=gen_config.temperature,
-            max_output_tokens=gen_config.max_output_tokens,
-            thinking_config=genai_types.ThinkingConfig(thinking_level=genai_types.ThinkingLevel.MINIMAL),
-        ),
+        config=_build_generate_config(gen_config),
     )
     answer_text = (response.text or "").strip()
 
@@ -1164,17 +1333,11 @@ def generate_answer_stream(
 ):
     """Generator: yield potongan teks jawaban dari Gemini satu per satu,
     begitu tiap chunk datang dari API (bukan menunggu jawaban lengkap)."""
-    context_block = build_context_block(retrieved_chunks)
-    prompt = f"KONTEKS:\n\n{context_block}\n\n\nPERTANYAAN:\n\n{query}\n\n\nJAWABAN:\n"
+    prompt, _context_block = _build_prompt(query, retrieved_chunks)
     stream = client.models.generate_content_stream(
         model=gen_config.gemini_model,
         contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=build_system_prompt(gen_config),
-            temperature=gen_config.temperature,
-            max_output_tokens=gen_config.max_output_tokens,
-            thinking_config=genai_types.ThinkingConfig(thinking_level=genai_types.ThinkingLevel.MINIMAL),
-        ),
+        config=_build_generate_config(gen_config),
     )
     for chunk in stream:
         if chunk.text:
@@ -1308,7 +1471,6 @@ class PipelineResources:
     gen_config: GenerationConfig
     abstention_config: AbstentionConfig
     embedding_model: SentenceTransformer
-    reranker: CrossEncoder
     qdrant_client: QdrantClient
     text_preprocessor: IndonesianTextPreprocessor
     retriever: HybridRetriever
@@ -1335,13 +1497,12 @@ def build_resources(base_dir: str = "./data") -> PipelineResources:
 
     chunks = load_chunks(retrieval_config.kb_json_path)
     embedding_model = load_embedding_model(retrieval_config.embedding_model_name)
-    reranker = load_reranker(retrieval_config.reranker_model_name)
     qdrant_client = initialize_qdrant_client(retrieval_config.qdrant_db_path)
     text_preprocessor = IndonesianTextPreprocessor()
 
     retriever = HybridRetriever(
         config=retrieval_config, embedding_model=embedding_model, qdrant_client=qdrant_client,
-        reranker=reranker, chunks=chunks, text_preprocessor=text_preprocessor,
+        chunks=chunks, text_preprocessor=text_preprocessor,
     )
 
     gemini_manager = RotatingKeyManager(load_api_keys(GEMINI_KEY_NAMES), lambda k: genai.Client(api_key=k))
@@ -1351,7 +1512,7 @@ def build_resources(base_dir: str = "./data") -> PipelineResources:
 
     return PipelineResources(
         paths=paths, retrieval_config=retrieval_config, gen_config=gen_config,
-        abstention_config=abstention_config, embedding_model=embedding_model, reranker=reranker,
+        abstention_config=abstention_config, embedding_model=embedding_model,
         qdrant_client=qdrant_client, text_preprocessor=text_preprocessor, retriever=retriever,
         gemini_manager=gemini_manager, abstention_detector=abstention_detector,
         kb_manager=kb_manager, conversation_store=conversation_store,

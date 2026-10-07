@@ -23,8 +23,8 @@ perintah build dan folder output (`dist`) secara otomatis.
 
 ## Konfigurasi backend
 
-Ganti `API_BASE` di `src/api/client.js` ke URL backend (ngrok atau domain
-lain). Bagian ini tidak diubah dari versi sebelumnya.
+Atur alamat backend lewat variabel `VITE_API_BASE` (salin `.env.example` menjadi `.env`, atau isi di Environment Variables Vercel). Kalau kosong, dipakai alamat cadangan di `src/api/client.js` (ngrok atau domain
+lain).
 
 ## Struktur gaya
 
@@ -58,7 +58,7 @@ Contoh pemakaian token: `bg-action`, `text-ink-soft`, `border-line`,
 | `Button.jsx` | `variant`: `primary`, `action` (oranye), `ghost`, `ghostDanger`, `danger`. `size`: `md`, `sm`, `nav`, `icon`. Prop `block` untuk lebar penuh |
 | `Field.jsx` | `Field` (label + input), plus `inputClass`, `fileInputClass`, `textareaClass` |
 | `Notice.jsx` | `FormError`, `ResultNote`, `SpinnerNote` |
-| `Tag.jsx` | Label status kecil di tabel |
+| `Tag.jsx` | Label status kecil di tabel (`tone`: `unverified`, `verified` hijau, `corrected` oranye, `warn`, `default`) |
 | `DataTable.jsx` | `TableWrap`, `Th`, `Tr`, `Td`, `InlineActions` |
 
 Kartu pesan chat ada di `src/components/MessageCards.jsx`.

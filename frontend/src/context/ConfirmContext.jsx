@@ -62,10 +62,11 @@ export function ConfirmProvider({ children }) {
             </h2>
             <p className="text-[14px] leading-normal text-ink-soft">{dialog.body}</p>
             <div className="mt-5 flex justify-end gap-2.5">
-              <Button variant="ghost" onClick={() => close(false)}>
+              {/* Aksi berbahaya: fokus awal di Batal supaya Enter tidak langsung menghapus. */}
+              <Button variant="ghost" onClick={() => close(false)} autoFocus={dialog.danger}>
                 {dialog.cancelLabel}
               </Button>
-              <Button variant={dialog.danger ? "danger" : "action"} onClick={() => close(true)} autoFocus>
+              <Button variant={dialog.danger ? "danger" : "action"} onClick={() => close(true)} autoFocus={!dialog.danger}>
                 {dialog.confirmLabel}
               </Button>
             </div>

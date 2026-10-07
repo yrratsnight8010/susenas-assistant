@@ -29,7 +29,7 @@ export default function RoomSidebar({ rail = false, onNavigate }) {
     event.stopPropagation();
     const confirmed = await confirmDialog({
       title: "Hapus percakapan ini?",
-      body: `"${room.title}" akan dihapus permanen beserta seluruh riwayat tanya-jawab di dalamnya. Tindakan ini tidak bisa dibatalkan.`,
+      body: `"${room.title}" beserta seluruh riwayat tanya-jawab di dalamnya akan dihapus dari daftar percakapan Anda. Tindakan ini tidak bisa dibatalkan.`,
       confirmLabel: "Hapus",
       danger: true,
     });

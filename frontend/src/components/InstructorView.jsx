@@ -1,17 +1,15 @@
 import { useState } from "react";
 import { cx } from "../utils/cx.js";
-import CorrectionsLogTab from "./CorrectionsLogTab.jsx";
-import CorrectionsTab from "./CorrectionsTab.jsx";
-import UploadTab from "./UploadTab.jsx";
+import KnowledgeBaseTab from "./KnowledgeBaseTab.jsx";
+import ReviewTab from "./ReviewTab.jsx";
 
 const TABS = [
-  { id: "correction", label: "Koreksi Jawaban" },
-  { id: "log", label: "Log Koreksi" },
-  { id: "upload", label: "Tambah Dokumen" },
+  { id: "review", label: "Tinjau Percakapan" },
+  { id: "kb", label: "Kelola KB" },
 ];
 
 export default function InstructorView() {
-  const [activeTab, setActiveTab] = useState("correction");
+  const [activeTab, setActiveTab] = useState("review");
 
   return (
     // Hanya panel ini yang scroll (main tidak), sehingga scrollbar berada di tepi kanan viewport.
@@ -38,16 +36,13 @@ export default function InstructorView() {
         </div>
 
         {/* Setiap tab tetap mounted (bukan unmount/remount) supaya state-nya
-            (mis. checkbox filter, baris yang sedang di-expand) tidak hilang
+            (mis. filter status, baris yang sedang di-expand) tidak hilang
             waktu pindah tab. Tab yang tidak aktif cukup disembunyikan. */}
-        <div className={activeTab === "correction" ? undefined : "hidden"}>
-          <CorrectionsTab active={activeTab === "correction"} />
+        <div className={activeTab === "review" ? undefined : "hidden"}>
+          <ReviewTab active={activeTab === "review"} />
         </div>
-        <div className={activeTab === "log" ? undefined : "hidden"}>
-          <CorrectionsLogTab active={activeTab === "log"} />
-        </div>
-        <div className={activeTab === "upload" ? undefined : "hidden"}>
-          <UploadTab />
+        <div className={activeTab === "kb" ? undefined : "hidden"}>
+          <KnowledgeBaseTab active={activeTab === "kb"} />
         </div>
       </div>
     </section>

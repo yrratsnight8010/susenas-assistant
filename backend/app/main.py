@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from app.api.v1 import auth as auth_router  # noqa: E402
 from app.api.v1 import chat as chat_router  # noqa: E402
 from app.api.v1 import instructor as instructor_router  # noqa: E402
-from app.core.config import get_settings  # noqa: E402
+from app.core.config import get_settings, validate_settings  # noqa: E402
 from app.services.rag_pipeline import build_resources  # noqa: E402
 
 logger = logging.getLogger("uvicorn")
@@ -35,11 +35,12 @@ logger = logging.getLogger("uvicorn")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Bangun semua resource berat (embedding model, reranker, index
+    """Bangun semua resource berat (embedding model, index
     Qdrant/BM25, koneksi Gemini, dsb.) SEKALI saat server start, lalu
     simpan di app.state -- pengganti langsung dari
     `@st.cache_resource` + `get_resources()` di app.py Streamlit."""
     settings = get_settings()
+    validate_settings(settings)
     logger.info("Base dir data yang dipakai: %s", settings.data_dir)
     logger.info("Menyiapkan resource RAG (model & index)... ini bisa makan waktu di percobaan pertama.")
     app.state.resources = build_resources(base_dir=settings.data_dir)

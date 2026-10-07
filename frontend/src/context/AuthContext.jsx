@@ -30,7 +30,7 @@ export function AuthProvider({ children }) {
   // pohon komponen). Akibatnya, begitu AppShell pertama kali dirender
   // (baik dari sesi lama yang dipulihkan localStorage, maupun sesaat
   // sesudah login()), komponen anak yang langsung fetch data di
-  // useEffect-nya sendiri (mis. CorrectionsTab di panel instruktur)
+  // useEffect-nya sendiri (mis. ReviewTab di panel instruktur)
   // sempat mengirim request DULUAN, sebelum useEffect AuthProvider ini
   // sempat menaruh token ke client.js -- request itu berangkat TANPA
   // header Authorization sama sekali, dan backend membalas 403 "Not
