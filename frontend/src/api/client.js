@@ -2,7 +2,10 @@
 // (misal di Vercel/Netlify) dari backend (Colab + ngrok). Kalau frontend
 // masih di-serve satu origin sama backend (lewat StaticFiles di main.py),
 // biarkan saja kosong "".
-export const API_BASE = "https://gulf-extrude-cobalt.ngrok-free.dev";
+// Bisa ditimpa lewat VITE_API_BASE (mis. di Vercel -> Environment Variables
+// atau file frontend/.env) tanpa mengubah kode. Nilai di bawah hanya
+// cadangan kalau variabel itu tidak diisi.
+export const API_BASE = (import.meta.env.VITE_API_BASE ?? "https://gulf-extrude-cobalt.ngrok-free.dev").replace(/\/+$/, "");
 
 // Header ini yang bikin warning page ngrok ("You are about to visit...")
 // gak muncul untuk request API (fetch) dari JS -- ngrok skip

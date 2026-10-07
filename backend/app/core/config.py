@@ -43,7 +43,11 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 
 class Settings(BaseSettings):
     # -- Keamanan / JWT --
-    jwt_secret_key: str = "GANTI_DENGAN_SECRET_ACAK_YANG_PANJANG"
+    # Wajib diisi lewat APP_JWT_SECRET_KEY di .env. Sengaja TIDAK punya nilai
+    # default yang bisa ditebak: kalau kosong/masih placeholder, server
+    # menolak start (lihat validate_settings di bawah) -- default yang
+    # diketahui publik berarti siapa pun bisa memalsukan token login.
+    jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480  # 8 jam
 
@@ -63,6 +67,17 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def validate_settings(settings: Settings) -> None:
+    """Hentikan server (dengan pesan jelas) kalau JWT secret belum diisi
+    dengan benar. Dipanggil sekali saat startup dari app/main.py."""
+    secret = (settings.jwt_secret_key or "").strip()
+    if len(secret) < 16 or secret.lower().startswith("ganti"):
+        raise RuntimeError(
+            "APP_JWT_SECRET_KEY belum diisi dengan benar. Isi di backend/.env dengan string "
+            "acak minimal 16 karakter (contoh: python -c \"import secrets; print(secrets.token_urlsafe(48))\")."
+        )
 
 
 def load_accounts(path: str) -> list[dict]:
